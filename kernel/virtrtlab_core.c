@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * virtrtlab_core.c — VirtRTLab core: virtual bus registration and sysfs kobject tree
+ * VirtRTLab core — virtual bus registration and sysfs kobject tree
  *
  * Part of VirtRTLab — Linux real-time peripheral simulation framework
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/init.h>
 #include <linux/module.h>
@@ -63,29 +65,29 @@ static int __init virtrtlab_core_init(void)
 	/* 1. Register the virtual bus type → /sys/bus/virtrtlab/ */
 	ret = bus_register(&virtrtlab_bus_type);
 	if (ret) {
-		pr_err("virtrtlab_core: failed to register bus type: %d\n", ret);
+		pr_err("failed to register bus type: %d\n", ret);
 		return ret;
 	}
 
 	/* 2. Create /sys/kernel/virtrtlab/ */
 	virtrtlab_kobj = kobject_create_and_add("virtrtlab", kernel_kobj);
 	if (!virtrtlab_kobj) {
-		pr_err("virtrtlab_core: failed to create root kobject\n");
+		pr_err("failed to create root kobject\n");
 		ret = -ENOMEM;
-		goto err_kobj;
+		goto err_bus_register;
 	}
 
 	/* 3. Populate root attributes (version) */
 	ret = sysfs_create_group(virtrtlab_kobj, &virtrtlab_root_attr_group);
 	if (ret) {
-		pr_err("virtrtlab_core: failed to create sysfs group: %d\n", ret);
+		pr_err("failed to create sysfs group: %d\n", ret);
 		goto err_group;
 	}
 
 	/* 4. Create /sys/kernel/virtrtlab/buses/ */
 	virtrtlab_buses_kobj = kobject_create_and_add("buses", virtrtlab_kobj);
 	if (!virtrtlab_buses_kobj) {
-		pr_err("virtrtlab_core: failed to create buses kobject\n");
+		pr_err("failed to create buses kobject\n");
 		ret = -ENOMEM;
 		goto err_buses;
 	}
@@ -93,12 +95,12 @@ static int __init virtrtlab_core_init(void)
 	/* 5. Create /sys/kernel/virtrtlab/devices/ */
 	virtrtlab_devices_kobj = kobject_create_and_add("devices", virtrtlab_kobj);
 	if (!virtrtlab_devices_kobj) {
-		pr_err("virtrtlab_core: failed to create devices kobject\n");
+		pr_err("failed to create devices kobject\n");
 		ret = -ENOMEM;
 		goto err_devices;
 	}
 
-	pr_info("virtrtlab_core: loaded (v%s)\n", VIRTRTLAB_VERSION);
+	pr_info("loaded (v%s)\n", VIRTRTLAB_VERSION);
 	return 0;
 
 	/* Error unwind — reverse order of allocation */
@@ -108,7 +110,7 @@ err_buses:
 	sysfs_remove_group(virtrtlab_kobj, &virtrtlab_root_attr_group);
 err_group:
 	kobject_put(virtrtlab_kobj);
-err_kobj:
+err_bus_register:
 	bus_unregister(&virtrtlab_bus_type);
 	return ret;
 }
@@ -121,7 +123,7 @@ static void __exit virtrtlab_core_exit(void)
 	sysfs_remove_group(virtrtlab_kobj, &virtrtlab_root_attr_group);
 	kobject_put(virtrtlab_kobj);
 	bus_unregister(&virtrtlab_bus_type);
-	pr_info("virtrtlab_core: unloaded\n");
+	pr_info("unloaded\n");
 }
 
 module_init(virtrtlab_core_init);
