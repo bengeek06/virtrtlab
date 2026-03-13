@@ -5,8 +5,8 @@
  * Part of VirtRTLab — Linux real-time peripheral simulation framework
  */
 
-#ifndef _VIRTRTLAB_CORE_H
-#define _VIRTRTLAB_CORE_H
+#ifndef VIRTRTLAB_CORE_H
+#define VIRTRTLAB_CORE_H
 
 #include <linux/device/bus.h>
 
@@ -16,4 +16,4 @@
  */
 extern const struct bus_type virtrtlab_bus_type;
 
-#endif /* _VIRTRTLAB_CORE_H */
+#endif /* VIRTRTLAB_CORE_H */
