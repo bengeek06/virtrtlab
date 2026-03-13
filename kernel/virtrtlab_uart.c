@@ -10,6 +10,9 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/printk.h>
+/* Included in anticipation of device registration on virtrtlab_bus_type.
+ * Actual bus registration is implemented in a subsequent issue.
+ */
 #include "virtrtlab_core.h"
 
 static int __init virtrtlab_uart_init(void)
