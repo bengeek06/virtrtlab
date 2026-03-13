@@ -62,7 +62,7 @@ flowchart TD
     TTY["/dev/ttyVIRTLABx\ntty_driver · N_TTY · VMIN/VTIME · O_NONBLOCK"]
     UART["virtrtlab_uart\n─────────────────────────────\nhrtimer TX pacing — burst at baud cadence\ncircular TX/RX buffers — size via sysfs\nfault injection — latency · jitter · drop · bitflip"]
     WIRE["/dev/virtrtlab-wireN\nmisc char device — one per UART instance"]
-    DAEMON["virtrtlabd\n─────────────────────────────\nmodule loading · socket creation\nselect() relay loop"]
+  DAEMON["virtrtlabd\n─────────────────────────────\nsocket creation\nselect() relay loop"]
     SOCK["/run/virtrtlab/uartN.sock\nAF_UNIX · SOCK_STREAM · raw bytes"]
     SIM["Simulator program"]
     SYSFS[("sysfs\n/sys/kernel/virtrtlab/\ndevices/uartN/")]

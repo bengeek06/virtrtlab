@@ -70,12 +70,21 @@ while True:
                 # wire_fd stays open to receive bus state notifications.
                 set_nonblocking(wire_fd)
                 while True:
-                    stale = read(wire_fd)      # discard; stop at EAGAIN
-                    if not stale: break
+                    stale, err = read(wire_fd)
+                    if err == EAGAIN:          # all pending AUT→daemon bytes drained
+                        break
+                    if err == EIO:             # bus transitioned to state=down during drain
+                        break                  # keep wire_fd open; outer loop observes state changes
+                    if not stale:              # EOF: state=reset invalidated wire_fd
+                        close(wire_fd)
+                        wire_fd = open_wire()
+                        break
                 set_blocking(wire_fd)
                 break
             write(wire_fd, data)               # to AUT (non-blocking: EAGAIN → overrun)
 ```
+
+On simulator disconnect, the daemon drains only the AUT→daemon direction to avoid replaying stale bytes into the next simulator session. Drain runs in non-blocking mode until `read()` returns `-EAGAIN`; if the bus transitions to `state=down`, `read()` may return `-EIO` and draining stops immediately. If `state=reset` occurs during drain, `read()` returns EOF (`0`) and the daemon must re-open the wire device before accepting the next simulator connection.
 
 ## Testing
 

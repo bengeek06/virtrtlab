@@ -1,4 +1,4 @@
 # Docs
 
 - Sysfs: [sysfs.md](sysfs.md)
-- Socket protocol: [socket-api.md](socket-api.md)
+- Wire device and daemon socket: [socket-api.md](socket-api.md)
