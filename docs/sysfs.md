@@ -46,7 +46,7 @@ Writing any other string returns `-EINVAL`. Initial state on module load: `up`.
 | `bus` | ro | string | Parent bus, e.g. `vrtlbus0` |
 | `enabled` | rw | bool | `0\|1` — gate all data flow |
 | `latency_ns` | rw | u64 | Base TX latency added to every transfer (ns) |
-| `jitter_ns` | rw | u64 | Uniform jitter amplitude (ns) |
+| `jitter_ns` | rw | u64 | Uniform jitter amplitude (ns); sampled as a uniform random value in $[0, \text{jitter\_ns}]$ and added to `latency_ns` |
 | `drop_rate_ppm` | rw | u32 | Drops per million bytes/frames |
 | `bitflip_rate_ppm` | rw | u32 | Bit flips per million bytes/frames |
 
@@ -77,8 +77,8 @@ These attributes **reflect** the current termios state set by the AUT via `tcset
 
 | Attribute | Access | Type | Default | Constraints |
 |---|---|---|---|---|
-| `tx_buf_sz` | rw | u32 | `4096` | 64 ≤ value ≤ 65536, power-of-two preferred |
-| `rx_buf_sz` | rw | u32 | `4096` | 64 ≤ value ≤ 65536, power-of-two preferred |
+| `tx_buf_sz` | rw | u32 | `4096` | Must be a power of two; 64 ≤ value ≤ 65536. Non-power-of-two writes return `-EINVAL`. Read back the attr after writing to confirm the accepted value. |
+| `rx_buf_sz` | rw | u32 | `4096` | Must be a power of two; 64 ≤ value ≤ 65536. Non-power-of-two writes return `-EINVAL`. Read back the attr after writing to confirm the accepted value. |
 
 Writes take effect on the **next** open of `/dev/ttyVIRTLABx` (not live-resizable while open).
 
@@ -100,7 +100,7 @@ Counters are reset by writing `0` to `stats/reset`.
 | Condition | Kernel behaviour |
 |---|---|
 | `tx_buf_sz`/`rx_buf_sz` write while device open | return `-EBUSY` |
-| `tx_buf_sz`/`rx_buf_sz` write out of range | return `-EINVAL` |
+| `tx_buf_sz`/`rx_buf_sz` write out of range or non-power-of-two | return `-EINVAL` |
 | `latency_ns`/`jitter_ns` write > 10 000 000 000 ns | return `-EINVAL` |
 | `drop_rate_ppm`/`bitflip_rate_ppm` write > 1 000 000 | return `-EINVAL` |
 | `enabled` ← `0` while AUT has `/dev/ttyVIRTLABx` open | return `-EIO` from the next AUT `write()`; `read()` returns `0` (EOF) |

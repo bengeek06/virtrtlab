@@ -51,9 +51,18 @@ while select([wire_fd, sock_fd]):
 # Connect a terminal to the simulated UART
 socat - UNIX-CONNECT:/run/virtrtlab/uart0.sock
 
-# Wire two UART instances together for loopback testing
-socat UNIX-CONNECT:/run/virtrtlab/uart0.sock \\
-      UNIX-CONNECT:/run/virtrtlab/uart1.sock
+# Loopback test: relay bytes between two UART instances via a custom simulator
+# (virtrtlabd relays each socket independently; cross-connecting requires a
+# userspace process that reads from uart0.sock and writes to uart1.sock)
+python3 -c "
+import socket, select
+s0 = socket.socket(socket.AF_UNIX); s0.connect('/run/virtrtlab/uart0.sock')
+s1 = socket.socket(socket.AF_UNIX); s1.connect('/run/virtrtlab/uart1.sock')
+while True:
+    r, _, _ = select.select([s0, s1], [], [])
+    if s0 in r: s1.send(s0.recv(4096))
+    if s1 in r: s0.send(s1.recv(4096))
+"
 
 # Inspect the stream
 socat - UNIX-CONNECT:/run/virtrtlab/uart0.sock | xxd

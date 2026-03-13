@@ -196,9 +196,8 @@ There is **no control channel on the socket**. Fault injection, buffer sizes, an
 # Connect to the simulated UART (after virtrtlabd is running)
 socat - UNIX-CONNECT:/run/virtrtlab/uart0.sock
 
-# Wire two instances together for loopback testing
-socat UNIX-CONNECT:/run/virtrtlab/uart0.sock \
-      UNIX-CONNECT:/run/virtrtlab/uart1.sock
+# Loopback test: relay bytes between two instances
+# (requires a userspace relay — see docs/socket-api.md)
 ```
 
 ---
@@ -214,8 +213,8 @@ Command structure:
   - `virtrtlabctl get uart0 baud`
   - `virtrtlabctl set uart0 latency_ns=500000`
   - `virtrtlabctl set uart0 drop_rate_ppm=20000`
-  - `virtrtlabctl stats uart0`
-  - `virtrtlabctl reset uart0`
+  - `virtrtlabctl stats uart0` — display all stats counters for uart0
+- `virtrtlabctl reset uart0` — reset all stats counters for uart0 to zero (equivalent to writing `0` to `stats/reset`)
 - Daemon lifecycle:
   - `virtrtlabctl daemon start`
   - `virtrtlabctl daemon stop`
