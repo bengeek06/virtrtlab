@@ -37,32 +37,43 @@ Bytes are delivered in-order, preserving the UART byte stream.
 
 ```python
 # Simplified relay loop in virtrtlabd
+
+def open_wire():
+    return open('/dev/virtrtlab-wire0', O_RDWR)  # exclusive; returns -EBUSY if already open
+
 server_sock = socket(AF_UNIX, SOCK_STREAM)
 bind(server_sock, '/run/virtrtlab/uart0.sock')
 listen(server_sock)
+wire_fd = open_wire()
 
 while True:
     # Wait for a simulator to connect
     client_sock = accept(server_sock)
 
-    # Relay until simulator disconnects
+    # Relay until simulator disconnects or bus transitions
     while True:
         r, _, _ = select([wire_fd, client_sock], [], [])
         if wire_fd in r:
-            data = read(wire_fd)       # from AUT
-            if not data: break         # wire device closed
-            write(client_sock, data)   # to simulator
+            data, err = read(wire_fd)          # from AUT
+            if err == EIO:                     # state=down: bus halted, wire fd still valid
+                continue                       # busy-wait; POLLHUP clears when state=up
+            if not data:                       # EOF: state=reset has invalidated this wire_fd
+                close(wire_fd)
+                wire_fd = open_wire()          # re-open for clean post-reset state
+                break                          # disconnect simulator; next accept() is clean
+            write(client_sock, data)           # to simulator
         if client_sock in r:
             data = recv(client_sock)
-            if not data:               # simulator disconnected
-                flush_rx_buffer(wire_fd)
+            if not data:                       # simulator disconnected
+                flush_rx_buffer(wire_fd)       # discard buffered simulator→AUT bytes
                 break
-            write(wire_fd, data)       # to AUT (non-blocking: EAGAIN → overrun)
+            write(wire_fd, data)               # to AUT (non-blocking: EAGAIN → overrun)
 ```
 
 ## Testing
 
 ```sh
+# Prerequisite: virtrtlab_core and virtrtlab_uart loaded; virtrtlabd running.
 # Connect a terminal to the simulated UART
 socat - UNIX-CONNECT:/run/virtrtlab/uart0.sock
 

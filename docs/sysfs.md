@@ -21,7 +21,7 @@ Sub-directories: `buses/`, `devices/`.
 | Attribute | Access | Type | Description |
 |---|---|---|---|
 | `state` | rw | string | `up\|down\|reset` |
-| `clock_ns` | ro | u64 | `CLOCK_MONOTONIC` snapshot (ns) taken at the moment the attr is read; resolution is kernel `hrtimer` resolution |
+| `clock_ns` | ro | u64 | `CLOCK_MONOTONIC` snapshot (ns) taken at the moment the attr is read; nanosecond-precision via `ktime_get_ns()`, not driven by the TX hrtimer |
 | `seed` | rw | u32 | RNG seed for stochastic fault profiles; the xorshift32 PRNG is re-seeded on write; one PRNG draw per drop/bitflip decision |
 
 ### `state` semantics
@@ -29,12 +29,14 @@ Sub-directories: `buses/`, `devices/`.
 | Written value | Behaviour | Value read back |
 |---|---|---|
 | `up` | Resume data flow on all devices attached to this bus | `up` |
-| `down` | Halt TX/RX on all attached devices. Pending TX bytes: **drained** to the wire device if the daemon has it open; **dropped immediately** (incrementing `stats/drops`) if no daemon is attached. AUT `write()` returns `-EIO` while halted. | `down` |
-| `reset` | One-shot command: (1) drop pending TX bytes and close wire device; (2) reset all per-device stats counters to `0`; (3) clear `latency_ns`, `jitter_ns`, `drop_rate_ppm`, `bitflip_rate_ppm` to `0`; (4) set `enabled` to `1`; (5) transition to `up`. `tx_buf_sz`, `rx_buf_sz`, and termios mirrors are unaffected. | `up` |
+| `down` | Halt TX/RX on all attached devices. Pending TX bytes: **drained** to the wire device if the daemon has it open; **dropped immediately** (incrementing `stats/drops`) if no daemon is attached. AUT `write()` returns `-EIO` while halted. Wire device: `poll()` asserts `POLLHUP \| POLLERR` and de-asserts `POLLIN`/`POLLOUT`; `read(wire_fd)` and `write(wire_fd)` return `-EIO`. After `state=up`, the wire fd remains valid — no re-open required. AUT `open("/dev/ttyVIRTLABx")` succeeds even when down; subsequent read/write return `-EIO`. | `down` |
+| `reset` | One-shot command: (1) drop pending TX bytes; deliver EOF to any open wire_fd (`read()` returns `0`, `poll()` asserts `POLLHUP`) — the daemon must `close()` + re-`open()` the wire device; (2) reset all per-device stats counters to `0`; (3) clear `latency_ns`, `jitter_ns`, `drop_rate_ppm`, `bitflip_rate_ppm` to `0`; (4) set `enabled` to `1` on all attached devices; (5) transition to `up`. `tx_buf_sz`, `rx_buf_sz`, and termios mirrors are unaffected. | `up` |
 
 Writing any other string returns `-EINVAL`. Initial state on module load: `up`.
 
 When `state` is set to `down` and the wire device is not open: pending TX bytes are **dropped immediately** (`stats/drops` incremented). Drain would stall indefinitely with no consumer.
+
+**`state` vs `enabled` interaction**: `state` is a bus-level gate; `enabled` is a device-level gate. Both must be active for data to flow through a device. `state=down` overrides `enabled=1` — all devices on the bus halt regardless of their individual `enabled` value. `state=up` restores the bus gate but does **not** modify per-device `enabled`; a device that had `enabled=0` before `state=down` remains halted after `state=up`. Only `state=reset` forces `enabled=1` on all attached devices (step 4 above).
 
 ## Devices — common attrs
 
@@ -51,6 +53,12 @@ When `state` is set to `down` and the wire device is not open: pending TX bytes 
 | `bitflip_rate_ppm` | rw | u32 | Bit flips per million bytes; default `0` |
 
 > **Fault injection direction (v0.1.0)**: `latency_ns`, `jitter_ns`, `drop_rate_ppm`, and `bitflip_rate_ppm` apply on the **TX path only** (bytes flowing from the AUT toward the wire device). RX-direction injection (simulator → AUT) is deferred to v0.2.0.
+
+> **Burst definition (v0.1.0)**: one hrtimer callback = one character. The hrtimer fires at the character period `period_ns = ⌈bits_per_frame × 10⁹ / baud⌉` where `bits_per_frame = 1 (start) + databits + stopbits + (1 if parity ≠ none else 0)`. Each callback dequeues exactly one byte from the TX buffer (if non-empty), applies fault injection to it, and delivers it to the wire device.
+
+> **`latency_ns` / `jitter_ns` semantics**: after a burst is delivered, the hrtimer is re-armed at `now + period_ns + latency_ns + uniform(0, jitter_ns)`. When `latency_ns=0` and `jitter_ns>0`, jitter still applies — there is no fast-path bypass for zero base latency. These delays affect when bytes reach the wire device; the AUT's `write()` sees backpressure only when the TX circular buffer fills.
+
+> **Fault attr update timing**: writes to `latency_ns`, `jitter_ns`, `drop_rate_ppm`, or `bitflip_rate_ppm` take effect from the **next hrtimer callback** after the sysfs store returns; no in-flight burst is modified. Store uses `WRITE_ONCE()`; hrtimer callback reads with `READ_ONCE()`.
 
 > **Removed in v1**: `mode` (normal/record/replay) and `fault_policy` — record/replay and policy management are handled in userspace scripts, not the kernel.
 
@@ -69,7 +77,7 @@ These attributes **reflect** the current termios state set by the AUT via `tcset
 | `databits` | ro | u8 | `5\|6\|7\|8` |
 | `stopbits` | ro | u8 | `1\|2` |
 
-**Error behaviour**: if the AUT sets an unsupported speed, `baud` shows `0`.
+**Error behaviour**: if `tty_termios_baud_rate()` returns `0` for the speed set by the AUT (unsupported baud value or `B0`), `baud` shows `0`.
 
 **Initial state**: before the AUT opens `/dev/ttyVIRTLABx` for the first time (or after a bus `reset`), the attributes reflect the driver's default `termios` (`tty_std_termios`): `baud` = `38400`, `parity` = `none`, `databits` = `8`, `stopbits` = `1`.
 
@@ -90,12 +98,12 @@ Writes take effect on the **next** open of `/dev/ttyVIRTLABx` (not live-resizabl
 
 | Attribute | Type | Description |
 |---|---|---|
-| `tx_bytes` | u64 | Bytes sent from AUT toward the wire device |
+| `tx_bytes` | u64 | Bytes received from the AUT, counted **before** fault injection. `tx_bytes − drops ≈ bytes actually delivered to the wire device`. |
 | `rx_bytes` | u64 | Bytes received from wire device toward AUT |
 | `overruns` | u64 | **RX buffer only**: bytes evicted from the RX buffer (wire device → AUT) on overflow; incremented by the count of bytes evicted per overflow event. TX buffer never evicts — it applies backpressure instead. |
 | `drops` | u64 | Bytes discarded by fault injection (`drop_rate_ppm`) or by `state=down` with no daemon; incremented by the byte count of each dropped hrtimer burst. |
 
-Counters are reset by writing `0` to `stats/reset`.
+Counters are reset by writing `0` to `stats/reset`. Counters wrap silently at `UINT64_MAX` (modular arithmetic, no saturation).
 
 ### Error behaviour
 
@@ -106,8 +114,9 @@ Counters are reset by writing `0` to `stats/reset`.
 | `tx_buf_sz`/`rx_buf_sz` write out of range or non-power-of-two | return `-EINVAL` |
 | `latency_ns`/`jitter_ns` write > 10 000 000 000 ns | return `-EINVAL` |
 | `drop_rate_ppm`/`bitflip_rate_ppm` write > 1 000 000 | return `-EINVAL` |
-| `enabled` ← `0` while AUT has `/dev/ttyVIRTLABx` open | return `-EIO` from the next AUT `write()`; `read()` drains any bytes already in the RX buffer, then returns `0` (EOF) |
+| `enabled` ← `0` while AUT has `/dev/ttyVIRTLABx` open | return `-EIO` from the next AUT `write()`; a `write()` already sleeping in the TTY layer completes normally. `read()` drains any bytes already in the RX buffer, then returns `0` (EOF) |
 | `stats/reset` write value other than `0` | return `-EINVAL` |
+| `read()` on `stats/reset` | returns `-EPERM` (write-only attribute; no `show()` callback registered) |
 
 ## Rationale
 
@@ -122,3 +131,5 @@ Record/replay and named fault profiles are orchestration concepts. They are clea
 **Buffer live-resize** — deferred to v0.2.0: `tx_buf_sz`/`rx_buf_sz` writes rejected while device is open (`-EBUSY`).
 
 **Baud rate change notification** — not in v0.1.0: `tcsetattr()` updates termios state and the sysfs `baud` attr atomically. `virtrtlabd` reads `baud` from sysfs on demand; no uevent or control byte is generated by the kernel.
+
+**PRNG scope** — the xorshift32 state lives at the bus level (`buses/vrtlbus0/seed`), shared across all devices on that bus. Devices on the same bus draw from the shared state in interleaved order; each device does not maintain its own PRNG. For reproducible CI results, write `seed` before activating stochastic fault injection and record it in test artifacts.

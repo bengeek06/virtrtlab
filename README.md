@@ -95,7 +95,7 @@ Fault injection and device configuration are done exclusively via **sysfs**:
 | `virtrtlab_uart` | TTY driver + misc wire device + hrtimer pacing + fault engine |
 | `/dev/ttyVIRTLABx` | AUT-facing interface — standard termios / O_NONBLOCK |
 | `/dev/virtrtlab-wireN` | Raw byte pipe from kernel to daemon (misc char device) |
-| `virtrtlabd` | Daemon — module loading, socket creation, select() relay |
+| `virtrtlabd` | Daemon — socket creation, select() relay (module loading is external: systemd unit, CI script, or manual `insmod`) |
 | `/run/virtrtlab/uart0.sock` | Raw SOCK_STREAM byte channel to/from the simulator |
 | `virtrtlabctl` | CLI — sysfs get/set, stats, daemon lifecycle |
 
@@ -219,7 +219,7 @@ Command structure:
   - `virtrtlabctl set uart0 latency_ns=500000`
   - `virtrtlabctl set uart0 drop_rate_ppm=20000`
   - `virtrtlabctl stats uart0` — display all stats counters for uart0
-  - `virtrtlabctl reset uart0` — reset all stats counters for uart0 to zero (equivalent to writing `0` to `stats/reset`)
+  - `virtrtlabctl reset uart0` — reset stats counters only (equivalent to writing `0` to `stats/reset`); for a full device reset including fault attrs and `enabled`, write `reset` to the bus `state` attr
 - Daemon lifecycle:
   - `virtrtlabctl daemon start`
   - `virtrtlabctl daemon stop`
@@ -293,6 +293,10 @@ Deferred to later milestones:
 **Multi-connection socket** — single active connection per device socket: a second `connect()` attempt is rejected. No observer mode in v0.1.0.
 
 **Automatic reconnect after simulator disconnect** — flush and stay: on simulator `close()`, `virtrtlabd` discards undelivered TX bytes and returns to `listen()` without restarting.
+
+**Module unload while device open** — `rmmod virtrtlab_uart` while `/dev/ttyVIRTLABx` or `/dev/virtrtlab-wireN` is open returns `-EBUSY`. The TTY subsystem holds a refcount on the `tty_driver` while any TTY fd is open; the wire misc device checks `try_module_get()` at `open()` time and releases the reference at `release()`. Forced unload (`rmmod -f`) is explicitly unsupported.
+
+**PRNG scope** — one xorshift32 state per bus (`buses/vrtlbus0/seed`), shared across all devices on that bus. Devices draw from the bus-level PRNG in interleaved order. Each device does not have its own PRNG state.
 
 ---
 
