@@ -13,6 +13,10 @@
 #include <linux/kobject.h>
 #include <linux/sysfs.h>
 #include <linux/device/bus.h>
+/* Included to let the compiler cross-check our definition against the
+ * extern declaration exposed to peripheral modules.
+ */
+#include "virtrtlab_core.h"
 
 #define VIRTRTLAB_VERSION "0.1.0"
 
@@ -20,9 +24,10 @@
  * Bus type — visible in /sys/bus/virtrtlab/
  */
 
-static struct bus_type virtrtlab_bus_type = {
+const struct bus_type virtrtlab_bus_type = {
 	.name = "virtrtlab",
 };
+EXPORT_SYMBOL_GPL(virtrtlab_bus_type);
 
 /*
  * sysfs kobject tree:

@@ -9,6 +9,9 @@
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD  := $(shell pwd)
 
+# Internal headers shared across VirtRTLab kernel modules
+ccflags-y += -I$(src)/include
+
 obj-m += virtrtlab_core.o
 obj-m += virtrtlab_uart.o
 
