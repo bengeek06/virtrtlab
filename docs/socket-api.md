@@ -18,8 +18,8 @@ Control operations (fault injection, configuration) are done via **sysfs** — n
 One per UART instance (N = 0, 1, …).
 
 - Opened exclusively by `virtrtlabd`: `open()` returns `-EBUSY` if the device is already open (enforced by an `atomic_t open_count` checked at `open()` time)
-- `read()` — bytes coming from the AUT (via `/dev/ttyVIRTLABx`)
-- `write()` — bytes going toward the AUT
+- `read()` — bytes coming from the AUT (via `/dev/ttyVIRTLABx`); blocks until data is available
+- `write()` — bytes going toward the AUT; **non-blocking**: returns `-EAGAIN` immediately if the RX buffer is full (never blocks the relay loop)
 - `poll()`/`select()` — both `POLLIN` and `POLLOUT` supported
 
 The kernel applies fault injection (latency, jitter, drop, bitflip) **before** delivering bytes to the wire device.
@@ -36,13 +36,28 @@ Bytes are delivered in-order, preserving the UART byte stream.
 ## Relay logic (virtrtlabd)
 
 ```python
-while select([wire_fd, sock_fd]):
-    if wire_fd readable:
-        data = read(wire_fd)      # from AUT
-        write(sock_fd, data)      # to simulator
-    if sock_fd readable:
-        data = read(sock_fd)      # from simulator
-        write(wire_fd, data)      # to AUT
+# Simplified relay loop in virtrtlabd
+server_sock = socket(AF_UNIX, SOCK_STREAM)
+bind(server_sock, '/run/virtrtlab/uart0.sock')
+listen(server_sock)
+
+while True:
+    # Wait for a simulator to connect
+    client_sock = accept(server_sock)
+
+    # Relay until simulator disconnects
+    while True:
+        r, _, _ = select([wire_fd, client_sock], [], [])
+        if wire_fd in r:
+            data = read(wire_fd)       # from AUT
+            if not data: break         # wire device closed
+            write(client_sock, data)   # to simulator
+        if client_sock in r:
+            data = recv(client_sock)
+            if not data:               # simulator disconnected
+                flush_rx_buffer(wire_fd)
+                break
+            write(wire_fd, data)       # to AUT (non-blocking: EAGAIN → overrun)
 ```
 
 ## Testing

@@ -21,20 +21,20 @@ Sub-directories: `buses/`, `devices/`.
 | Attribute | Access | Type | Description |
 |---|---|---|---|
 | `state` | rw | string | `up\|down\|reset` |
-| `clock_ns` | ro | u64 | Monotonic snapshot (ns) |
-| `seed` | rw | u32 | RNG seed for stochastic fault profiles |
+| `clock_ns` | ro | u64 | `CLOCK_MONOTONIC` snapshot (ns) taken at the moment the attr is read; resolution is kernel `hrtimer` resolution |
+| `seed` | rw | u32 | RNG seed for stochastic fault profiles; the xorshift32 PRNG is re-seeded on write; one PRNG draw per drop/bitflip decision |
 
 ### `state` semantics
 
 | Written value | Behaviour | Value read back |
 |---|---|---|
 | `up` | Resume data flow on all devices attached to this bus | `up` |
-| `down` | Halt TX/RX on all attached devices; pending TX bytes are **drained** to the wire device before halting; AUT `write()` returns `-EIO` while halted | `down` |
-| `reset` | One-shot command: drain TX buffers, reset all per-device stats counters, clear all fault injection attrs to `0`; transitions to `up` on completion | `up` |
+| `down` | Halt TX/RX on all attached devices. Pending TX bytes: **drained** to the wire device if the daemon has it open; **dropped immediately** (incrementing `stats/drops`) if no daemon is attached. AUT `write()` returns `-EIO` while halted. | `down` |
+| `reset` | One-shot command: (1) drop pending TX bytes and close wire device; (2) reset all per-device stats counters to `0`; (3) clear `latency_ns`, `jitter_ns`, `drop_rate_ppm`, `bitflip_rate_ppm` to `0`; (4) set `enabled` to `1`; (5) transition to `up`. `tx_buf_sz`, `rx_buf_sz`, and termios mirrors are unaffected. | `up` |
 
 Writing any other string returns `-EINVAL`. Initial state on module load: `up`.
 
-**Bus `down` with no daemon attached — decided (Option A):** when `state` is set to `down` and the wire device is not open, TX bytes in the circular buffer are dropped immediately. Draining to a closed wire device would stall indefinitely. `stats/drops` is incremented by the byte count discarded.
+When `state` is set to `down` and the wire device is not open: pending TX bytes are **dropped immediately** (`stats/drops` incremented). Drain would stall indefinitely with no consumer.
 
 ## Devices — common attrs
 
@@ -44,11 +44,11 @@ Writing any other string returns `-EINVAL`. Initial state on module load: `up`.
 |---|---|---|---|
 | `type` | ro | string | `uart\|can\|spi\|adc\|dac\|…` |
 | `bus` | ro | string | Parent bus, e.g. `vrtlbus0` |
-| `enabled` | rw | bool | `0\|1` — gate all data flow |
-| `latency_ns` | rw | u64 | Base TX latency added to every transfer (ns) |
-| `jitter_ns` | rw | u64 | Uniform jitter amplitude (ns); sampled as a uniform random value in $[0, \text{jitter\_ns}]$ and added to `latency_ns` |
-| `drop_rate_ppm` | rw | u32 | Drops per million bytes/frames |
-| `bitflip_rate_ppm` | rw | u32 | Bit flips per million bytes/frames |
+| `enabled` | rw | bool | `0\|1` — gate all data flow; default `1` |
+| `latency_ns` | rw | u64 | Base TX latency per burst (ns); default `0` |
+| `jitter_ns` | rw | u64 | Uniform jitter amplitude (ns); sampled as a uniform random value in $[0, \text{jitter\_ns}]$ added to `latency_ns`; default `0` |
+| `drop_rate_ppm` | rw | u32 | Drops per million bytes; default `0` |
+| `bitflip_rate_ppm` | rw | u32 | Bit flips per million bytes; default `0` |
 
 > **Fault injection direction (v0.1.0)**: `latency_ns`, `jitter_ns`, `drop_rate_ppm`, and `bitflip_rate_ppm` apply on the **TX path only** (bytes flowing from the AUT toward the wire device). RX-direction injection (simulator → AUT) is deferred to v0.2.0.
 
@@ -92,8 +92,8 @@ Writes take effect on the **next** open of `/dev/ttyVIRTLABx` (not live-resizabl
 |---|---|---|
 | `tx_bytes` | u64 | Bytes sent from AUT toward the wire device |
 | `rx_bytes` | u64 | Bytes received from wire device toward AUT |
-| `overruns` | u64 | Bytes dropped due to buffer overflow; incremented by the **count of bytes evicted** per overflow event (not 1 per event) |
-| `drops` | u64 | Bytes discarded by fault injection; incremented by the **byte count of each dropped hrtimer burst** (not 1 per drop decision) |
+| `overruns` | u64 | **RX buffer only**: bytes evicted from the RX buffer (wire device → AUT) on overflow; incremented by the count of bytes evicted per overflow event. TX buffer never evicts — it applies backpressure instead. |
+| `drops` | u64 | Bytes discarded by fault injection (`drop_rate_ppm`) or by `state=down` with no daemon; incremented by the byte count of each dropped hrtimer burst. |
 
 Counters are reset by writing `0` to `stats/reset`.
 
@@ -106,7 +106,8 @@ Counters are reset by writing `0` to `stats/reset`.
 | `tx_buf_sz`/`rx_buf_sz` write out of range or non-power-of-two | return `-EINVAL` |
 | `latency_ns`/`jitter_ns` write > 10 000 000 000 ns | return `-EINVAL` |
 | `drop_rate_ppm`/`bitflip_rate_ppm` write > 1 000 000 | return `-EINVAL` |
-| `enabled` ← `0` while AUT has `/dev/ttyVIRTLABx` open | return `-EIO` from the next AUT `write()`; `read()` returns `0` (EOF) |
+| `enabled` ← `0` while AUT has `/dev/ttyVIRTLABx` open | return `-EIO` from the next AUT `write()`; `read()` drains any bytes already in the RX buffer, then returns `0` (EOF) |
+| `stats/reset` write value other than `0` | return `-EINVAL` |
 
 ## Rationale
 

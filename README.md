@@ -4,9 +4,8 @@ VirtRTLab is a Linux/POSIX real‑time testing framework based on **kernel modul
 
 Goal: run an application-under-test (AUT) *as if it were connected to real hardware*, while VirtRTLab provides:
 
-- Peripheral discovery/connection via sysfs
-- Runtime configuration via sysfs
-- A control/injection socket to introduce **faults, jitter, delays, drops, bit flips**, etc.
+- Peripheral discovery via sysfs
+- Runtime fault injection via sysfs (latency, jitter, drops, bit flips)
 - CI-oriented scenarios that help surface **race conditions, deadlocks, priority inversion, starvation**, and other timing-sensitive bugs
 
 This document defines **v1 naming and interface conventions** so modules and tooling stay consistent.
@@ -43,7 +42,13 @@ One core module + multiple peripheral modules:
 
 - Bus instance: `vrtlbus<N>` (e.g. `vrtlbus0`)
 - Device instance: `<type><N>` (e.g. `uart0`, `can1`, `spi0`, `adc0`, `dac0`)
-- Endpoint/port naming (when applicable): `port<N>`
+- TTY device node: `/dev/ttyVIRTLAB<N>` (AUT-facing; N matches the device index)
+- Wire device node: `/dev/virtrtlab-wire<N>` (daemon-facing; N matches the device index)
+- Daemon socket: `/run/virtrtlab/<type><N>.sock` (e.g. `uart0.sock`)
+
+### Module parameters
+
+- `virtrtlab_uart`: `num_uarts` (int, default `1`, range `1..8`) — number of UART instances to register at load time. Each instance N creates `uart<N>` on the bus, `/dev/ttyVIRTLAB<N>`, and `/dev/virtrtlab-wire<N>`.
 
 ---
 
@@ -214,7 +219,7 @@ Command structure:
   - `virtrtlabctl set uart0 latency_ns=500000`
   - `virtrtlabctl set uart0 drop_rate_ppm=20000`
   - `virtrtlabctl stats uart0` — display all stats counters for uart0
-- `virtrtlabctl reset uart0` — reset all stats counters for uart0 to zero (equivalent to writing `0` to `stats/reset`)
+  - `virtrtlabctl reset uart0` — reset all stats counters for uart0 to zero (equivalent to writing `0` to `stats/reset`)
 - Daemon lifecycle:
   - `virtrtlabctl daemon start`
   - `virtrtlabctl daemon stop`
