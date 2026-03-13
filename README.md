@@ -22,7 +22,7 @@ This document defines **v1 naming and interface conventions** so modules and too
 - Sysfs namespace: `virtrtlab`
 - Userspace control naming:
   - CLI: `virtrtlabctl`
-  - Socket: `/run/virtrtlab.sock` (UNIX domain socket)
+  - Sockets (per device): `/run/virtrtlab/uart0.sock`, `/run/virtrtlab/uart1.sock`, …
   - State dir: `/run/virtrtlab/`
 
 ### Module names
@@ -105,11 +105,8 @@ VirtRTLab exposes a stable sysfs API. The recommended layout is under `/sys/kern
 `/sys/kernel/virtrtlab/`
 
 - `version` (ro): semantic version string, e.g. `0.1.0`
-- `build_id` (ro): git SHA/date
 - `buses/`
 - `devices/`
-- `profiles/` (optional; may be userspace-managed)
-- `stats/` (global counters)
 
 ### Bus instances
 
@@ -118,7 +115,6 @@ VirtRTLab exposes a stable sysfs API. The recommended layout is under `/sys/kern
 - `state` (rw): `up|down|reset`
 - `clock_ns` (ro): monotonic timestamp sampled by core
 - `seed` (rw): RNG seed for stochastic profiles
-- `default_policy` (rw): default injection policy name
 
 ### Devices
 
@@ -147,6 +143,7 @@ Type-specific examples:
   - `tx_buf_sz` (rw): TX circular buffer size in bytes (default: `4096`)
   - `rx_buf_sz` (rw): RX circular buffer size in bytes (default: `4096`)
   - `stats/tx_bytes`, `stats/rx_bytes`, `stats/overruns`, `stats/drops` (ro)
+  - `stats/reset` (wo): write `0` to reset all counters atomically
 
 - CAN (`…/can0/`)
   - `bitrate` (rw)
@@ -250,8 +247,8 @@ Recommended CI pattern:
 
 1. Boot test image / VM (or container with privileged kernel access)
 2. Load modules (`virtrtlab_core` + needed peripherals)
-3. Create `vrtlbus0` and devices via sysfs or module params
-4. Run AUT test suite under different VirtRTLab profiles
+3. Load peripherals (`insmod virtrtlab_uart.ko`); the bus `vrtlbus0` and devices register automatically at `module_init()`
+4. Run AUT test suite under different VirtRTLab fault profiles
 5. Collect logs + VirtRTLab stats + kernel traces (ftrace, lockdep, perf sched)
 
 ---

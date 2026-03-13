@@ -17,7 +17,7 @@ Control operations (fault injection, configuration) are done via **sysfs** — n
 
 One per UART instance (N = 0, 1, …).
 
-- Opened exclusively by `virtrtlabd`
+- Opened exclusively by `virtrtlabd`: `open()` returns `-EBUSY` if the device is already open (enforced by an `atomic_t open_count` checked at `open()` time)
 - `read()` — bytes coming from the AUT (via `/dev/ttyVIRTLABx`)
 - `write()` — bytes going toward the AUT
 - `poll()`/`select()` — both `POLLIN` and `POLLOUT` supported
