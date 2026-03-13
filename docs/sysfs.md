@@ -105,10 +105,13 @@ Writes take effect on the **next** open of `/dev/ttyVIRTLABx` (not live-resizabl
 
 Counters are reset by writing `0` to `stats/reset`. Counters wrap silently at `UINT64_MAX` (modular arithmetic, no saturation).
 
+> **Counter units (UART)**: all four counters measure individual **bytes**. For future peripheral types (CAN, SPI, …), counter units are type-specific and documented in each peripheral's spec section; the common-attrs table does not define units.
+
 ### Error behaviour
 
 | Condition | Kernel behaviour |
 |---|---|
+| `open("/dev/ttyVIRTLABx")` when bus `state=down` | succeeds (returns a valid fd); subsequent `read()`/`write()` on that fd return `-EIO` until `state=up` |
 | `write()` to `/dev/ttyVIRTLABx` when TX buffer full (e.g. due to `latency_ns` backpressure) | `O_NONBLOCK`: return `-EAGAIN`; blocking: suspend until `write_room() > 0`. No bytes dropped. |
 | `tx_buf_sz`/`rx_buf_sz` write while device open | return `-EBUSY` |
 | `tx_buf_sz`/`rx_buf_sz` write out of range or non-power-of-two | return `-EINVAL` |

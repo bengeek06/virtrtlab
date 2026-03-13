@@ -39,7 +39,7 @@ Bytes are delivered in-order, preserving the UART byte stream.
 # Simplified relay loop in virtrtlabd
 
 def open_wire():
-    return open('/dev/virtrtlab-wire0', O_RDWR)  # exclusive; returns -EBUSY if already open
+    return open('/dev/virtrtlab-wire0', O_RDWR)  # exclusive; a concurrent second open() returns -EBUSY
 
 server_sock = socket(AF_UNIX, SOCK_STREAM)
 bind(server_sock, '/run/virtrtlab/uart0.sock')
@@ -56,7 +56,8 @@ while True:
         if wire_fd in r:
             data, err = read(wire_fd)          # from AUT
             if err == EIO:                     # state=down: bus halted, wire fd still valid
-                continue                       # busy-wait; POLLHUP clears when state=up
+                time.sleep(0.01)               # back-off; POLLHUP|POLLERR clears on state=up
+                continue
             if not data:                       # EOF: state=reset has invalidated this wire_fd
                 close(wire_fd)
                 wire_fd = open_wire()          # re-open for clean post-reset state
@@ -65,7 +66,13 @@ while True:
         if client_sock in r:
             data = recv(client_sock)
             if not data:                       # simulator disconnected
-                flush_rx_buffer(wire_fd)       # discard buffered simulator→AUT bytes
+                # Drain pending AUT→daemon bytes so next simulator starts clean.
+                # wire_fd stays open to receive bus state notifications.
+                set_nonblocking(wire_fd)
+                while True:
+                    stale = read(wire_fd)      # discard; stop at EAGAIN
+                    if not stale: break
+                set_blocking(wire_fd)
                 break
             write(wire_fd, data)               # to AUT (non-blocking: EAGAIN → overrun)
 ```

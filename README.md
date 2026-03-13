@@ -48,7 +48,7 @@ One core module + multiple peripheral modules:
 
 ### Module parameters
 
-- `virtrtlab_uart`: `num_uarts` (int, default `1`, range `1..8`) — number of UART instances to register at load time. Each instance N creates `uart<N>` on the bus, `/dev/ttyVIRTLAB<N>`, and `/dev/virtrtlab-wire<N>`.
+- `virtrtlab_uart`: `num_uarts` (int, default `1`, range `1..8`) — number of UART instances to register at load time. Instance indices are **0-based**: with `num_uarts=2`, instances are N=0 and N=1, producing `uart0`, `uart1`, `/dev/ttyVIRTLAB0`, `/dev/ttyVIRTLAB1`, `/dev/virtrtlab-wire0`, `/dev/virtrtlab-wire1`.
 
 ---
 
