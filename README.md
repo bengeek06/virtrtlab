@@ -49,20 +49,50 @@ One core module + multiple peripheral modules:
 
 ## 2) Architecture (v1)
 
-VirtRTLab is split into:
+### Data path (UART example)
 
-1. **Kernel side**
-   - `virtrtlab_core`: provides a virtual bus and a common "fault/jitter engine".
-   - Peripheral modules register devices on the bus and expose configuration through sysfs.
-   - A kernel control plane receives injection commands and applies them deterministically.
+```mermaid
+flowchart TD
+    AUT["AUT\n(Application Under Test)"]
+    TTY["/dev/ttyVIRTLABx\ntty_driver · N_TTY · VMIN/VTIME · O_NONBLOCK"]
+    UART["virtrtlab_uart\n─────────────────────────────\nhrtimer TX pacing — burst at baud cadence\ncircular TX/RX buffers — size via sysfs\nfault injection — latency · jitter · drop · bitflip"]
+    WIRE["/dev/virtrtlab-wireN\nmisc char device — one per UART instance"]
+    DAEMON["virtrtlabd\n─────────────────────────────\nmodule loading · socket creation\nselect() relay loop"]
+    SOCK["/run/virtrtlab/uartN.sock\nAF_UNIX · SOCK_STREAM · raw bytes"]
+    SIM["Simulator program"]
+    SYSFS[("sysfs\n/sys/kernel/virtrtlab/\ndevices/uartN/")]
 
-2. **Userspace side**
-   - `virtrtlabctl`: config helper (discover devices, apply profiles, inject faults).
-   - A UNIX socket server (could be inside `virtrtlabctl` or a small daemon) that:
-     - accepts injection commands
-     - forwards them to the kernel module (e.g., via netlink, ioctl on a control char dev, or a misc device)
+    AUT <-->|"termios / read() / write()"| TTY
+    TTY <--> UART
+    UART <-->|"raw bytes"| WIRE
+    WIRE <-->|"read() / write() / poll()"| DAEMON
+    DAEMON <-->|"raw bytes"| SOCK
+    SOCK <--> SIM
 
-> Implementation detail (netlink vs misc device vs ioctl) is left open, but the **socket API** below is fixed for tooling.
+    UART -. "baud · parity · tx_buf_sz\nlatency_ns · drop_rate_ppm\nstats (ro)" .-> SYSFS
+    SYSFS -. "fault injection\nbuffer config\nenable/disable" .-> UART
+```
+
+### Control path
+
+Fault injection and device configuration are done exclusively via **sysfs**:
+
+- Arm a fault: `echo 500000 > /sys/kernel/virtrtlab/devices/uart0/latency_ns`
+- Observe termios state: `cat /sys/kernel/virtrtlab/devices/uart0/baud`
+
+`virtrtlabctl` is a thin sysfs convenience wrapper and a `virtrtlabd` lifecycle manager.
+
+### Components
+
+| Component | Role |
+|---|---|
+| `virtrtlab_core` | Virtual bus (`vrtlbus<N>`), kobject tree, `version` attr |
+| `virtrtlab_uart` | TTY driver + misc wire device + hrtimer pacing + fault engine |
+| `/dev/ttyVIRTLABx` | AUT-facing interface — standard termios / O_NONBLOCK |
+| `/dev/virtrtlab-wireN` | Raw byte pipe from kernel to daemon (misc char device) |
+| `virtrtlabd` | Daemon — module loading, socket creation, select() relay |
+| `/run/virtrtlab/uart0.sock` | Raw SOCK_STREAM byte channel to/from the simulator |
+| `virtrtlabctl` | CLI — sysfs get/set, stats, daemon lifecycle |
 
 ---
 
@@ -99,22 +129,24 @@ Common files (all device types):
 - `type` (ro): `uart|can|spi|adc|dac|…`
 - `bus` (ro): `vrtlbus0`
 - `enabled` (rw): `0|1`
-- `mode` (rw): `normal|record|replay`
-- `latency_ns` (rw): base latency added to operations
-- `jitter_ns` (rw): uniform jitter amplitude
-- `drop_rate_ppm` (rw): drops per million
-- `bitflip_rate_ppm` (rw): bit flips per million
-- `fault_policy` (rw): active policy name
-- `stats/` (ro): per-device counters
-  - `tx_frames`, `rx_frames`, `drops`, `timeouts`, `crc_errors`, … (type-specific allowed)
+- `latency_ns` (rw): base TX latency added to every transfer (nanoseconds)
+- `jitter_ns` (rw): uniform jitter amplitude (nanoseconds)
+- `drop_rate_ppm` (rw): drops per million bytes/frames
+- `bitflip_rate_ppm` (rw): bit flips per million bytes/frames
+- `stats/` (ro): per-device counters (type-specific; see below)
+
+> `mode` (normal/record/replay) and `fault_policy` are **not** exposed in sysfs — record/replay and policy orchestration are handled in userspace scripts.
 
 Type-specific examples:
 
 - UART (`/sys/kernel/virtrtlab/devices/uart0/`)
-  - `baud` (rw)
-  - `parity` (rw): `none|even|odd`
-  - `databits` (rw): `5|6|7|8`
-  - `stopbits` (rw): `1|2`
+  - `baud` (ro): mirror of termios speed, e.g. `115200`
+  - `parity` (ro): `none|even|odd` — mirror of termios PARENB/PARODD
+  - `databits` (ro): `5|6|7|8` — mirror of termios CS5..CS8
+  - `stopbits` (ro): `1|2` — mirror of termios CSTOPB
+  - `tx_buf_sz` (rw): TX circular buffer size in bytes (default: `4096`)
+  - `rx_buf_sz` (rw): RX circular buffer size in bytes (default: `4096`)
+  - `stats/tx_bytes`, `stats/rx_bytes`, `stats/overruns`, `stats/drops` (ro)
 
 - CAN (`…/can0/`)
   - `bitrate` (rw)
@@ -136,102 +168,41 @@ Type-specific examples:
 
 ---
 
-## 4) Control & injection socket
+## 4) Wire device and daemon socket
 
-### Socket path and transport
+### Wire device
 
-- UNIX domain socket: `/run/virtrtlab.sock`
-- Protocol: **line-delimited JSON** (one JSON object per line)
-  - easy to test with `socat`/`nc`
-  - robust for CI and for sending batches
+Each UART instance exposes a misc char device:
 
-### Message envelope (v1)
+- `/dev/virtrtlab-wire0` (uart0), `/dev/virtrtlab-wire1` (uart1), …
 
-All messages follow:
+The wire device is a **raw byte pipe** between `virtrtlab_uart` (kernel) and the `virtrtlabd` daemon. It supports `read()`, `write()`, `poll()`/`select()`.
 
-```json
-{
-  "id": "uuid-or-ci-step-id",
-  "op": "inject|profile|query|reset",
-  "target": {
-    "bus": "vrtlbus0",
-    "device": "uart0"
-  },
-  "ts": {
-    "mode": "immediate|at_monotonic_ns|after_ns",
-    "value": 0
-  },
-  "args": {}
-}
+The kernel applies fault injection (latency, jitter, drop, bitflip) **before** delivering bytes to the wire device.
+
+### Daemon socket
+
+`virtrtlabd` creates one UNIX socket per device:
+
+- `/run/virtrtlab/uart0.sock` (`AF_UNIX`, `SOCK_STREAM`, raw bytes)
+- `/run/virtrtlab/uart1.sock`, …
+
+The simulator connects and exchanges raw bytes — no framing, no length prefix. `virtrtlabd` relays bytes between the wire device and the socket using `select()`.
+
+### Control
+
+There is **no control channel on the socket**. Fault injection, buffer sizes, and device stats are all accessed via sysfs (see Section 3).
+
+### Testing with socat
+
+```sh
+# Connect to the simulated UART (after virtrtlabd is running)
+socat - UNIX-CONNECT:/run/virtrtlab/uart0.sock
+
+# Wire two instances together for loopback testing
+socat UNIX-CONNECT:/run/virtrtlab/uart0.sock \
+      UNIX-CONNECT:/run/virtrtlab/uart1.sock
 ```
-
-- `id`: correlates request/response
-- `target.device` may be omitted for bus-wide operations
-- `ts` controls when the action becomes active (important for determinism)
-
-### Responses
-
-Server replies with one JSON line:
-
-```json
-{ "id": "…", "ok": true, "result": { } }
-```
-
-or
-
-```json
-{ "id": "…", "ok": false, "error": { "code": "EINVAL", "message": "…" } }
-```
-
-### Standard ops
-
-#### `query`
-
-- `args.kind`: `"buses"|"devices"|"stats"|"capabilities"`
-
-#### `reset`
-
-- `args.scope`: `"bus"|"device"|"all"`
-
-#### `profile`
-
-Apply a named profile (bundle of sysfs values + injection rules).
-
-- `args.name`: profile name
-- `args.parameters`: optional overrides
-
-#### `inject`
-
-Inject a fault/jitter rule.
-
-- `args.rule` examples:
-
-```json
-{
-  "kind": "delay",
-  "direction": "rx|tx|both",
-  "ns": 500000
-}
-```
-
-```json
-{
-  "kind": "drop",
-  "direction": "rx",
-  "rate_ppm": 20000,
-  "burst": { "on_frames": 10, "off_frames": 100 }
-}
-```
-
-```json
-{
-  "kind": "priority_inversion",
-  "scope": "kernel_worker",
-  "duration_ns": 2000000
-}
-```
-
-> The last example is "advanced": it assumes the core provides hooks to stress worker priorities/locks. If this is too invasive for v1, keep it as a future capability.
 
 ---
 
@@ -244,14 +215,14 @@ Command structure:
   - `virtrtlabctl list devices`
 - Sysfs convenience:
   - `virtrtlabctl get uart0 baud`
-  - `virtrtlabctl set uart0 baud=115200 parity=none`
-- Profiles:
-  - `virtrtlabctl profile apply uart_stress --device uart0`
-- Injection:
-  - `virtrtlabctl inject uart0 delay --rx 500us --after 10ms`
-  - `virtrtlabctl inject can0 drop --rate 20000ppm --burst 10/100`
-- CI helpers:
-  - `virtrtlabctl run scenario deadlock_hunt --duration 60s --seed 1234`
+  - `virtrtlabctl set uart0 latency_ns=500000`
+  - `virtrtlabctl set uart0 drop_rate_ppm=20000`
+  - `virtrtlabctl stats uart0`
+  - `virtrtlabctl reset uart0`
+- Daemon lifecycle:
+  - `virtrtlabctl daemon start`
+  - `virtrtlabctl daemon stop`
+  - `virtrtlabctl daemon status`
 
 Output rules:
 
@@ -260,8 +231,8 @@ Output rules:
 - Exit codes:
   - `0` success
   - `2` invalid args
-  - `3` transport error
-  - `4` kernel rejected op
+  - `3` daemon/socket error
+  - `4` kernel attribute write rejected
 
 ---
 
@@ -269,12 +240,11 @@ Output rules:
 
 To make CI results meaningful:
 
-- Prefer time-based activation (`ts.mode`) over "immediate" where possible.
-- Make stochastic behavior reproducible:
-  - explicit `seed` (bus-level)
-  - record seeds and profile names in artifacts
-- Always export stats:
-  - `virtrtlabctl query stats --json > artifacts/virtrtlab-stats.json`
+- Make stochastic behavior reproducible with an explicit RNG seed:
+  - Write `seed` on the bus kobject before activating fault injection
+  - Record the seed value in CI artifacts alongside stats
+- Always export stats at the end of a test run:
+  - `virtrtlabctl stats uart0 --json > artifacts/virtrtlab-stats.json`
 
 Recommended CI pattern:
 
@@ -286,32 +256,31 @@ Recommended CI pattern:
 
 ---
 
-## 7) v1 scope (suggested)
+## 7) v0.1.0 scope
 
-Start with a minimal, valuable slice:
+Minimal valuable slice delivered by `v0.1.0`:
 
-- `virtrtlab_core` + one peripheral (`virtrtlab_uart` or `virtrtlab_can`)
-- sysfs config for latency/jitter/drop/bitflip
-- control socket with `inject/query/reset`
-- per-device stats counters
+- `virtrtlab_core` — virtual bus, kobject tree, `version` sysfs attr
+- `virtrtlab_uart` — TTY driver `/dev/ttyVIRTLABx`, misc wire device `/dev/virtrtlab-wireN`, hrtimer TX pacing, fault injection, sysfs attrs
+- `virtrtlabd` — daemon, `select()` relay, `/run/virtrtlab/` sockets
+- `virtrtlabctl` — sysfs get/set, stats, daemon lifecycle
 
-Then iterate:
+Deferred to later milestones:
 
-- record/replay (capture a real trace and replay it)
-- burst models, correlated jitter
-- integration with tracing (tracepoints for injections applied)
+- `v0.2.0`: `virtrtlab_can`, RTS/CTS and XON/XOFF flow control simulation, record/replay
+- `v0.3.0`: tracepoints for injected faults, full CI integration, lockdep stress scenarios
 
 ---
 
-## 8) Open questions (to decide early)
+## 8) Open questions
 
-- Kernel↔userspace control transport:
-  - netlink vs misc char device vs configfs
-- Device exposure strategy:
-  - standalone sysfs-only vs also registering into existing subsystems (e.g. `tty`, `socketcan`, `spidev`)
-- Safety:
-  - permissions for `/run/virtrtlab.sock`
-  - capability checks for injection operations
+- **Safety / permissions**:
+  - Required capabilities for writing fault injection sysfs attrs (currently none enforced)
+  - Unix socket permissions for `/run/virtrtlab/` (group `virtrtlab`?)
+- **Flow control** (deferred to v0.2.0):
+  - RTS/CTS hardware flow control simulation
+  - XON/XOFF (software) flow control
+- **Baudrate change notification**: when the AUT calls `tcsetattr()` to change baud rate, should `virtrtlabd` be notified (e.g. via a sysfs uevent or a control byte on the wire device)?
 
 ---
 
