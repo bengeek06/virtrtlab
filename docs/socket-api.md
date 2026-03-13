@@ -79,8 +79,8 @@ The AUT exchanges raw bytes with the simulated UART. Wrapping bytes in JSONL wou
 **Why per-device sockets instead of a multiplexed global socket?**  
 Per-device sockets let the simulator process use a plain `connect()` to `/run/virtrtlab/uart0.sock` with no demultiplexing logic. This also matches what `socat` and raw POSIX tools expect.
 
-## Open questions
+## Decisions
 
-> **Open:** Should the daemon support multiple simultaneous connections per socket (e.g. one observer + one active simulator)? The current design assumes one active connection per socket.
+**Multiple connections per socket — single active connection:** `virtrtlabd` accepts exactly one `connect()` per socket at a time. A second `connect()` attempt is rejected (the process receives `ECONNREFUSED`). No observer/tap mode in v0.1.0.
 
-> **Open:** Should `virtrtlabd` automatically re-create the socket if the simulator disconnects and reconnects, without restarting the daemon?
+**Automatic reconnect after simulator disconnect — flush and stay:** when the simulator closes the socket, `virtrtlabd` flushes (discards) any bytes buffered in the wire device for that connection, then immediately returns to `listen()`. The daemon does not restart; the next simulator can `connect()` to a clean slate. Bytes accumulated during the disconnect window are lost.

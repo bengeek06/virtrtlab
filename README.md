@@ -268,15 +268,26 @@ Deferred to later milestones:
 
 ---
 
-## 8) Open questions
+## 8) Decisions
 
-- **Safety / permissions**:
-  - Required capabilities for writing fault injection sysfs attrs (currently none enforced)
-  - Unix socket permissions for `/run/virtrtlab/` (group `virtrtlab`?)
-- **Flow control** (deferred to v0.2.0):
-  - RTS/CTS hardware flow control simulation
-  - XON/XOFF (software) flow control
-- **Baudrate change notification**: when the AUT calls `tcsetattr()` to change baud rate, should `virtrtlabd` be notified (e.g. via a sysfs uevent or a control byte on the wire device)?
+**Safety / permissions** — decided:
+- sysfs fault injection attrs (`latency_ns`, `drop_rate_ppm`, etc.) require no kernel capability beyond standard filesystem permissions; access is controlled by the sysfs file mode (root-owned, `0644`). No `CAP_SYS_ADMIN` required.
+- `/dev/virtrtlab-wireN`, `/run/virtrtlab/` and its sockets are owned `root:virtrtlab` (mode `0660`). The `virtrtlabd` process and any monitoring tool must run as root or as a member of the `virtrtlab` group.
+- The AUT itself never touches the wire device or the sockets directly; it only opens `/dev/ttyVIRTLABx` (world-readable by default for TTY devices).
+
+**Backpressure when `latency_ns` exceeds buffer capacity** — follows the **16550 model**:
+- **TX buffer** (AUT → wire device): never evicts bytes. When full, `write_room()` returns `0`; the AUT's `write()` **blocks** (or returns `-EAGAIN` with `O_NONBLOCK`). `stats/overruns` is NOT incremented for TX.
+- **RX buffer** (wire device → AUT): evicts the **oldest byte** on overflow and increments `stats/overruns`. This models a hardware FIFO overrun.
+
+**Flow control** — deferred to v0.2.0: RTS/CTS and XON/XOFF simulation; see issue #11. Not an open question.
+
+**Baud rate change notification** — not in v0.1.0: `tcsetattr()` updates termios state and the sysfs `baud` attr. `virtrtlabd` may poll `baud` via sysfs on demand; no uevent or wire-device control byte is generated.
+
+**Buffer live-resize** — deferred to v0.2.0: `tx_buf_sz`/`rx_buf_sz` writes are rejected while the device is open (`-EBUSY`).
+
+**Multi-connection socket** — single active connection per device socket: a second `connect()` attempt is rejected. No observer mode in v0.1.0.
+
+**Automatic reconnect after simulator disconnect** — flush and stay: on simulator `close()`, `virtrtlabd` discards undelivered TX bytes and returns to `listen()` without restarting.
 
 ---
 
