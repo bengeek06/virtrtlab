@@ -20,7 +20,7 @@
  * Bus type — visible in /sys/bus/virtrtlab/
  */
 
-static const struct bus_type virtrtlab_bus_type = {
+static struct bus_type virtrtlab_bus_type = {
 	.name = "virtrtlab",
 };
 
