@@ -13,6 +13,7 @@ PWD  := $(shell pwd)
 ccflags-y += -I$(src)/include
 
 obj-m += virtrtlab_core.o
+obj-m += virtrtlab_gpio.o
 obj-m += virtrtlab_uart.o
 
 all:
