@@ -62,9 +62,15 @@ struct virtrtlab_gpio_dev {
 	u32			drop_rate_ppm;	/* default 0 */
 	u32			bitflip_rate_ppm; /* default 0 */
 
-	/* GPIO-specific state — all in the logical domain after active_low */
+	/*
+	 * GPIO-specific state.
+	 *
+	 * Note: @value is stored in the physical domain (pre-active_low), and
+	 * sysfs helpers / edge logic apply @active_low as needed when exposing
+	 * or interpreting logical state.
+	 */
 	u8			direction;	/* 1=AUT output, 0=AUT input; default 0x00 */
-	u8			value;		/* current logical bank state; default 0x00 */
+	u8			value;		/* current physical bank state; default 0x00 */
 	u8			active_low;	/* per-bit inversion mask; default 0x00 */
 	u8			edge_rising;	/* per-bit rising-edge enable; default 0x00 */
 	u8			edge_falling;	/* per-bit falling-edge enable; default 0x00 */
