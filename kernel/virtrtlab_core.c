@@ -16,6 +16,7 @@
 #include <linux/printk.h>
 #include <linux/spinlock.h>
 #include <linux/sysfs.h>
+#include <linux/mutex.h>
 /* Included to let the compiler cross-check our definition against the
  * extern declaration exposed to peripheral modules.
  */
@@ -48,6 +49,7 @@ struct kobject *virtrtlab_devices_kobj;
 EXPORT_SYMBOL_GPL(virtrtlab_devices_kobj);
 
 static DEFINE_SPINLOCK(virtrtlab_bus_lock);
+static DEFINE_MUTEX(virtrtlab_bus_state_mutex);
 static BLOCKING_NOTIFIER_HEAD(virtrtlab_bus_notifier);
 static enum virtrtlab_bus_state virtrtlab_bus_state = VIRTRTLAB_BUS_STATE_UP;
 static u32 virtrtlab_bus_prng_state = VIRTRTLAB_DEFAULT_SEED;
@@ -147,22 +149,34 @@ static void virtrtlab_bus_set_state(enum virtrtlab_bus_state new_state)
 	unsigned long flags;
 	enum virtrtlab_bus_state old_state;
 
+	/* Serialize full state transition + notifier emission. */
+	mutex_lock(&virtrtlab_bus_state_mutex);
+
 	spin_lock_irqsave(&virtrtlab_bus_lock, flags);
 	old_state = virtrtlab_bus_state;
 	virtrtlab_bus_state = new_state;
 	spin_unlock_irqrestore(&virtrtlab_bus_lock, flags);
 
-	if (old_state == new_state)
-		return;
+	if (old_state != new_state) {
+		virtrtlab_bus_notifier_call(
+			new_state == VIRTRTLAB_BUS_STATE_UP ?
+			VIRTRTLAB_BUS_EVENT_UP :
+			VIRTRTLAB_BUS_EVENT_DOWN);
+	}
 
-	virtrtlab_bus_notifier_call(new_state == VIRTRTLAB_BUS_STATE_UP ?
-				    VIRTRTLAB_BUS_EVENT_UP :
-				    VIRTRTLAB_BUS_EVENT_DOWN);
+	mutex_unlock(&virtrtlab_bus_state_mutex);
 }
 
 static void virtrtlab_bus_reset(void)
 {
 	unsigned long flags;
+
+	/*
+	 * Serialize RESET + state update + UP notification so that
+	 * concurrent sysfs writes to "state" cannot interleave their own
+	 * notifications and confuse peripherals.
+	 */
+	mutex_lock(&virtrtlab_bus_state_mutex);
 
 	/*
 	 * Fire RESET before updating state so peripheral callbacks can observe
@@ -177,6 +191,8 @@ static void virtrtlab_bus_reset(void)
 	spin_unlock_irqrestore(&virtrtlab_bus_lock, flags);
 
 	virtrtlab_bus_notifier_call(VIRTRTLAB_BUS_EVENT_UP);
+
+	mutex_unlock(&virtrtlab_bus_state_mutex);
 }
 
 static ssize_t state_store(struct kobject *kobj, struct kobj_attribute *attr,
