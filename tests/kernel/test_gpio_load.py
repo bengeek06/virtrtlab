@@ -69,15 +69,29 @@ class TestGpioLoadDefault:
         """insmod succeeds and module appears in /proc/modules."""
         assert _module_loaded("virtrtlab_gpio")
 
-    def test_dmesg_load_message(self, gpio_module):
+    def test_dmesg_load_message(self):
         """dmesg must contain 'gpio0 registered' after insmod."""
-        lines = dmesg_lines()
-        matching = [l for l in lines
-                    if "virtrtlab_gpio" in l and "gpio0" in l and "registered" in l]
-        assert matching, (
-            "Expected 'gpio0 registered on virtrtlab bus' in dmesg, got:\n"
-            + "\n".join(lines[-20:])
-        )
+        # Ensure a clean module state for this test.
+        if _module_loaded("virtrtlab_gpio"):
+            _rmmod("virtrtlab_gpio")
+
+        # Clear the kernel ring buffer so we only see messages from this insmod.
+        subprocess.run(["dmesg", "-C"], check=True)
+
+        try:
+            _insmod(KO)
+            lines = dmesg_lines()
+            matching = [l for l in lines
+                        if ("virtrtlab_gpio" in l and
+                            "gpio0" in l and
+                            "registered" in l)]
+            assert matching, (
+                "Expected 'gpio0 registered on virtrtlab bus' in dmesg, got:\n"
+                + "\n".join(lines[-20:])
+            )
+        finally:
+            if _module_loaded("virtrtlab_gpio"):
+                _rmmod("virtrtlab_gpio")
 
     def test_sysfs_gpio0_dir_exists(self, gpio_module):
         """gpio0 device directory must exist under sysfs/devices/."""
