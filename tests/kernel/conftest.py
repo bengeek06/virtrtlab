@@ -127,15 +127,16 @@ def core_module():
 
 
 @pytest.fixture()
-def gpio_module(core_module):
+def gpio_module(core_module, request):
     """
     Load virtrtlab_gpio (depends on core_module fixture).
-    Accepts an optional pytest parameter 'gpio_params' for module params.
+    Accepts an optional pytest parameter for module params
+    via indirect parametrization of this fixture.
     """
     if not os.path.exists(KO["gpio"]):
         pytest.skip(f"Module not built: {KO['gpio']}")
 
-    params = getattr(pytest, "_gpio_params", "")
+    params = getattr(request, "param", "")
     _rmmod("virtrtlab_gpio")
     _insmod(KO["gpio"], params)
     assert _module_loaded("virtrtlab_gpio"), "virtrtlab_gpio failed to load"
