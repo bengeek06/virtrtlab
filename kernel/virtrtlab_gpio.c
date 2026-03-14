@@ -465,11 +465,18 @@ static ssize_t value_store(struct device *dev, struct device_attribute *attr,
 		virtrtlab_gpio_apply(gdev);
 	} else {
 		/*
-		 * 5b — arm the per-bank hrtimer.
-		 * hrtimer_start() cancels any already-pending timer before
-		 * re-arming, so concurrent delayed writes are serialised:
-		 * only the last one survives (last-write-wins).
+		 * 5b — (re)arm the per-bank hrtimer.
+		 *
+		 * To implement "last-write-wins" for delayed writes, we must
+		 * explicitly cancel both the outstanding timer and any pending
+		 * apply_work instance that may have been queued by a previous
+		 * timer expiry. Otherwise, an older snapshot could still be
+		 * applied after this write, or this write's timer event could
+		 * be dropped if the work item is already pending.
 		 */
+		hrtimer_cancel(&gdev->delay_timer);
+		cancel_work_sync(&gdev->apply_work);
+
 		delay_ns = latency_ns;
 		if (jitter_ns) {
 			/*
