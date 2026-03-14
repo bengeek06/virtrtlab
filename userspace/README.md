@@ -1,17 +1,16 @@
 # Userspace tooling
 
-`virtrtlabctl` is a tiny helper to talk to the VirtRTLab UNIX socket.
+The `v0.1.0` userspace target is split into two roles:
 
-## Run
+- `virtrtlabd` — daemon for streamed peripherals in the MVP (UART first), exposing one AF_UNIX socket per device under `/run/virtrtlab/`
+- `virtrtlabctl` — CLI for discovery, sysfs get/set helpers, stats export, and daemon lifecycle
 
-```bash
-python3 ./virtrtlabctl.py --help
-```
+## Current repository status
 
-## Send a raw JSONL message
+The repository currently contains an early `virtrtlabctl.py` prototype. The canonical contract is defined in the root [README.md](../README.md), and the intended test layout is described in [../tests/README.md](../tests/README.md).
 
-```bash
-python3 ./virtrtlabctl.py send '{"id":"1","op":"query","target":{"bus":"vrtlbus0"},"ts":{"mode":"immediate","value":0},"args":{"kind":"devices"}}'
-```
+## v0.1.0 direction
 
-By default the socket path is `/run/virtrtlab.sock`. Override with `--socket`.
+- keep the CLI focused on sysfs and process orchestration
+- keep the daemon focused on raw socket relay for UART-class devices
+- validate both through the centralized `tests/` tree rather than ad-hoc scripts

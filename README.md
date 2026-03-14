@@ -1,6 +1,13 @@
 # VirtRTLab
 
-VirtRTLab is a Linux/POSIX real‑time testing framework based on **kernel modules** that simulate common peripherals (UART, CAN, SPI, DAC, ADC, …) on a **virtual bus**.
+VirtRTLab is a Linux/POSIX real-time testing framework based on **kernel modules** that simulate common peripherals on a **virtual bus**.
+
+The `v0.1.0` MVP focuses on **UART** and **GPIO** as two deliberately different validation paths:
+
+- UART validates streamed I/O, termios behaviour, pacing, buffering, and daemon-mediated simulator connectivity
+- GPIO validates discrete state transitions, direction changes, and event-oriented control paths
+
+The next milestone, `v0.2.0`, prioritizes **SPI**, **ADC**, and **DAC** to introduce higher-throughput paths and DMA-oriented scenarios.
 
 Goal: run an application-under-test (AUT) *as if it were connected to real hardware*, while VirtRTLab provides:
 
@@ -32,16 +39,16 @@ One core module + multiple peripheral modules:
   - `virtrtlab_core` (virtual bus + common infra)
 - Peripherals:
   - `virtrtlab_uart`
-  - `virtrtlab_can`
+  - `virtrtlab_gpio`
   - `virtrtlab_spi`
   - `virtrtlab_adc`
   - `virtrtlab_dac`
-  - (future) `virtrtlab_i2c`, `virtrtlab_gpio`, …
+  - (future) `virtrtlab_can`, `virtrtlab_i2c`, …
 
 ### Object naming
 
 - Bus instance: `vrtlbus<N>` (e.g. `vrtlbus0`)
-- Device instance: `<type><N>` (e.g. `uart0`, `can1`, `spi0`, `adc0`, `dac0`)
+- Device instance: `<type><N>` (e.g. `uart0`, `gpio0`, `spi0`, `adc0`, `dac0`)
 - TTY device node: `/dev/ttyVIRTLAB<N>` (AUT-facing; N matches the device index)
 - Wire device node: `/dev/virtrtlab-wire<N>` (daemon-facing; N matches the device index)
 - Daemon socket: `/run/virtrtlab/<type><N>.sock` (e.g. `uart0.sock`)
@@ -93,11 +100,40 @@ Fault injection and device configuration are done exclusively via **sysfs**:
 |---|---|
 | `virtrtlab_core` | Virtual bus (`vrtlbus<N>`), kobject tree, `version` attr |
 | `virtrtlab_uart` | TTY driver + misc wire device + hrtimer pacing + fault engine |
+| `virtrtlab_gpio` | GPIO-oriented peripheral model for direction/state/edge validation |
 | `/dev/ttyVIRTLABx` | AUT-facing interface — standard termios / O_NONBLOCK |
 | `/dev/virtrtlab-wireN` | Raw byte pipe from kernel to daemon (misc char device) |
-| `virtrtlabd` | Daemon — socket creation, select() relay (module loading is external: systemd unit, CI script, or manual `insmod`) |
-| `/run/virtrtlab/uart0.sock` | Raw SOCK_STREAM byte channel to/from the simulator |
+| `virtrtlabd` | Daemon for streamed peripherals in `v0.1.0` (UART first) — socket creation, select() relay |
+| `/run/virtrtlab/uart0.sock` | Raw SOCK_STREAM byte channel to/from the simulator for UART-class devices |
 | `virtrtlabctl` | CLI — sysfs get/set, stats, daemon lifecycle |
+
+### Repository layout (target for `v0.1.0`)
+
+`v0.1.0` is considered complete only when the repository contains the full vertical slice: kernel modules, daemon, CLI, and centralized tests.
+
+```text
+.
+|-- docs/
+|   |-- README.md
+|   |-- socket-api.md
+|   `-- sysfs.md
+|-- kernel/
+|   |-- include/
+|   |-- virtrtlab_core.c
+|   |-- virtrtlab_uart.c
+|   `-- virtrtlab_gpio.c
+|-- tests/
+|   |-- README.md
+|   |-- kernel/
+|   |-- daemon/
+|   |-- cli/
+|   |-- helpers/
+|   `-- fixtures/
+`-- userspace/
+  |-- README.md
+  |-- virtrtlabd.py
+  `-- virtrtlabctl.py
+```
 
 ---
 
@@ -127,7 +163,7 @@ VirtRTLab exposes a stable sysfs API. The recommended layout is under `/sys/kern
 
 Common files (all device types):
 
-- `type` (ro): `uart|can|spi|adc|dac|…`
+- `type` (ro): `uart|gpio|spi|adc|dac|…`
 - `bus` (ro): `vrtlbus0`
 - `enabled` (rw): `0|1`
 - `latency_ns` (rw): base TX latency added to every transfer (nanoseconds)
@@ -150,10 +186,12 @@ Type-specific examples:
   - `stats/tx_bytes`, `stats/rx_bytes`, `stats/overruns`, `stats/drops` (ro)
   - `stats/reset` (wo): write `0` to reset all counters atomically
 
-- CAN (`…/can0/`)
-  - `bitrate` (rw)
-  - `fd_enabled` (rw): `0|1`
-  - `arb_loss_rate_ppm` (rw)
+- GPIO (`…/gpio0/`)
+  - `direction` (rw): `in|out`
+  - `value` (rw/ro): `0|1`
+  - `active_low` (rw): `0|1`
+  - `edge` (rw): `none|rising|falling|both`
+  - `stats/value_changes`, `stats/edge_events` (ro)
 
 - SPI (`…/spi0/`)
   - `mode` (rw): `0|1|2|3`
@@ -251,29 +289,68 @@ Recommended CI pattern:
 
 1. Boot test image / VM (or container with privileged kernel access)
 2. Load modules (`virtrtlab_core` + needed peripherals)
-3. Load peripherals (`insmod virtrtlab_uart.ko`); the bus `vrtlbus0` and devices register automatically at `module_init()`
-4. Run AUT test suite under different VirtRTLab fault profiles
+3. Load the `v0.1.0` MVP stack (`virtrtlab_uart`, `virtrtlab_gpio`, `virtrtlabd`, `virtrtlabctl`); the bus `vrtlbus0` and devices register automatically at `module_init()`
+4. Run centralized tests from `tests/` under different VirtRTLab fault profiles
 5. Collect logs + VirtRTLab stats + kernel traces (ftrace, lockdep, perf sched)
+6. Export machine-readable test results for GitHub Actions artifacts and annotations
 
 ---
 
-## 7) v0.1.0 scope
+## 7) Roadmap and MVP scope
 
-Minimal valuable slice delivered by `v0.1.0`:
+`v0.1.0` is the MVP and must be a **complete** vertical slice:
 
-- `virtrtlab_core` — virtual bus, kobject tree, `version` sysfs attr
-- `virtrtlab_uart` — TTY driver `/dev/ttyVIRTLABx`, misc wire device `/dev/virtrtlab-wireN`, hrtimer TX pacing, fault injection, sysfs attrs
-- `virtrtlabd` — daemon, `select()` relay, `/run/virtrtlab/` sockets
-- `virtrtlabctl` — sysfs get/set, stats, daemon lifecycle
+- Kernel:
+  - `virtrtlab_core` — virtual bus, kobject tree, `version` sysfs attr
+  - `virtrtlab_uart` — streamed peripheral reference path: TTY, wire device, pacing, fault injection
+  - `virtrtlab_gpio` — discrete signal reference path: direction, value, edge-oriented behaviour
+- Userspace:
+  - `virtrtlabd` — daemon for streamed-device socket bridging
+  - `virtrtlabctl` — CLI for discovery, sysfs convenience, stats, and daemon lifecycle
+- Validation:
+  - centralized `tests/` tree covering kernel, daemon, and CLI behaviour
 
-Deferred to later milestones:
+`v0.2.0` priorities:
 
-- `v0.2.0`: `virtrtlab_can`, RTS/CTS and XON/XOFF flow control simulation, record/replay
-- `v0.3.0`: tracepoints for injected faults, full CI integration, lockdep stress scenarios
+- `virtrtlab_spi`, `virtrtlab_adc`, `virtrtlab_dac`
+- higher-throughput paths, sustained buffering pressure, and DMA-oriented scenarios
+- first data-heavy replay/profile capabilities where they serve throughput validation
+
+Deferred backlog after `v0.2.0`:
+
+- `virtrtlab_can`, `virtrtlab_i2c`, and other bus families
+- advanced flow-control variants and tracepoints for injected faults
+- broader CI stress campaigns once the MVP stack is stable
+
+## 8) Test strategy
+
+The recommended approach is a **single `tests/` tree** driven primarily by **Python** test orchestration, with a small number of focused **C helper programs** for low-level kernel-facing behaviour.
+
+Why this choice:
+
+- Python is the most practical layer for orchestrating `insmod`/`rmmod`, sysfs writes, daemon lifecycle, socket setup, timeouts, log capture, and GitHub Actions reporting
+- low-level contract checks such as `termios`, `poll()`, blocking vs `O_NONBLOCK`, and GPIO edge timing are easier to exercise accurately with tiny C helpers than with pure Python shims
+- adding CMake/CTest now would introduce a second build system without solving a concrete problem that `pytest` and a small test-local helper build cannot already cover
+
+Recommended split:
+
+- `tests/kernel/` — integration tests that drive the loaded modules from userspace and validate observable behaviour via sysfs, device nodes, and logs
+- `tests/daemon/` — relay and reconnect tests for `virtrtlabd`, including socket lifecycle, backpressure handling, and disconnect cleanup
+- `tests/cli/` — subprocess tests for `virtrtlabctl`, human-readable output, `--json`, and exit-code behaviour
+- `tests/helpers/` — small C programs for UART termios/poll semantics, GPIO edge consumers, and precise timing probes
+- `tests/fixtures/` — reusable pytest fixtures, test data, and expected-output samples
+
+GitHub Actions shape:
+
+1. Fast userspace checks on hosted runners: CLI parsing, daemon unit tests with mocks/fakes, documentation sanity
+2. Kernel integration on a privileged VM or self-hosted runner: module load/unload, sysfs behaviour, UART and GPIO contract tests
+3. Artifact collection: `dmesg`, per-device stats, daemon logs, and JUnit XML from the test runner
+
+See `tests/README.md` for the repository-level test layout.
 
 ---
 
-## 8) Decisions
+## 9) Decisions
 
 **Safety / permissions** — decided:
 - sysfs fault injection attrs (`latency_ns`, `drop_rate_ppm`, etc.) require no kernel capability beyond standard filesystem permissions; access is controlled by the sysfs file mode (root-owned, `0644`). No `CAP_SYS_ADMIN` required.
@@ -284,7 +361,7 @@ Deferred to later milestones:
 - **TX buffer** (AUT → wire device): never evicts bytes. When full, `write_room()` returns `0`; the AUT's `write()` **blocks** (or returns `-EAGAIN` with `O_NONBLOCK`). `stats/overruns` is NOT incremented for TX.
 - **RX buffer** (wire device → AUT): evicts the **oldest byte** on overflow and increments `stats/overruns`. This models a hardware FIFO overrun.
 
-**Flow control** — deferred to v0.2.0: RTS/CTS and XON/XOFF simulation; see issue #11. Not an open question.
+**Flow control** — not part of the `v0.1.0` MVP and no longer a priority driver for `v0.2.0`; it stays in the backlog until UART/GPIO MVP behaviour and the SPI/ADC/DAC throughput path are stable.
 
 **Baud rate change notification** — not in v0.1.0: `tcsetattr()` updates termios state and the sysfs `baud` attr. `virtrtlabd` may poll `baud` via sysfs on demand; no uevent or wire-device control byte is generated.
 

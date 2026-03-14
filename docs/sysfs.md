@@ -44,7 +44,7 @@ When `state` is set to `down` and the wire device is not open: pending TX bytes 
 
 | Attribute | Access | Type | Description |
 |---|---|---|---|
-| `type` | ro | string | `uart\|can\|spi\|adc\|dac\|…` |
+| `type` | ro | string | `uart\|gpio\|spi\|adc\|dac\|…` |
 | `bus` | ro | string | Parent bus, e.g. `vrtlbus0` |
 | `enabled` | rw | bool | `0\|1` — gate all data flow; default `1` |
 | `latency_ns` | rw | u64 | Base TX latency per burst (ns); default `0` |
@@ -120,6 +120,24 @@ Counters are reset by writing `0` to `stats/reset`. Counters wrap silently at `U
 | `enabled` ← `0` while AUT has `/dev/ttyVIRTLABx` open | return `-EIO` from the next AUT `write()`; a `write()` already sleeping in the TTY layer completes normally. `read()` drains any bytes already in the RX buffer, then returns `0` (EOF) |
 | `stats/reset` write value other than `0` | return `-EINVAL` |
 | `read()` on `stats/reset` | returns `-EPERM` (write-only attribute; no `show()` callback registered) |
+
+## Devices — GPIO (`gpio0`, `gpio1`, …)
+
+`v0.1.0` includes `virtrtlab_gpio` as the second reference peripheral family. Unlike UART, GPIO is intentionally **state-oriented** rather than stream-oriented and does not require the daemon socket path in the MVP.
+
+Minimum expected observable surface before implementation starts:
+
+| Attribute | Access | Type | Allowed values |
+|---|---|---|---|
+| `direction` | rw | string | `in\|out` |
+| `value` | rw/ro | bool | `0\|1` |
+| `active_low` | rw | bool | `0\|1` |
+| `edge` | rw | string | `none\|rising\|falling\|both` |
+| `stats/` | ro | directory | transition and error counters |
+
+> **Open:** define whether `virtrtlab_gpio` models one device per GPIO line or one device per GPIO bank, how line naming maps to `/sys/kernel/virtrtlab/devices/gpioN/`, and the exact counter set exposed under `stats/`.
+
+> **Open:** define the precise interaction between common fault attrs (`latency_ns`, `jitter_ns`, `drop_rate_ppm`, `bitflip_rate_ppm`) and GPIO semantics. For GPIO, `drop_rate_ppm` and `bitflip_rate_ppm` likely translate to suppressed or inverted value transitions rather than byte-level mutation.
 
 ## Rationale
 
