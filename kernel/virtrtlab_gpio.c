@@ -936,8 +936,8 @@ static int __init virtrtlab_gpio_init(void)
 		gdev->index   = n;
 		gdev->enabled = true;	/* all other fields zero-initialised by kzalloc */
 
-		hrtimer_init(&gdev->delay_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-		gdev->delay_timer.function = virtrtlab_gpio_timer_cb;
+		hrtimer_setup(&gdev->delay_timer, virtrtlab_gpio_timer_cb,
+			      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 		INIT_WORK(&gdev->apply_work, virtrtlab_gpio_apply_work_fn);
 
 		gdev->nb.notifier_call = virtrtlab_gpio_bus_notifier_call;
