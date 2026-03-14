@@ -47,18 +47,20 @@ When `state` is set to `down` and the wire device is not open: pending TX bytes 
 | `type` | ro | string | `uart\|gpio\|spi\|adc\|dac\|…` |
 | `bus` | ro | string | Parent bus, e.g. `vrtlbus0` |
 | `enabled` | rw | bool | `0\|1` — gate all data flow; default `1` |
-| `latency_ns` | rw | u64 | Base TX latency per burst (ns); default `0` |
+| `latency_ns` | rw | u64 | Base delivery latency per transfer unit (ns); default `0` |
 | `jitter_ns` | rw | u64 | Uniform jitter amplitude (ns); sampled as a uniform random value in $[0, \text{jitter\_ns}]$ added to `latency_ns`; default `0` |
-| `drop_rate_ppm` | rw | u32 | Drops per million bytes; default `0` |
-| `bitflip_rate_ppm` | rw | u32 | Bit flips per million bytes; default `0` |
+| `drop_rate_ppm` | rw | u32 | Drops per million transfer units; default `0` |
+| `bitflip_rate_ppm` | rw | u32 | Payload corruptions or inverted transitions per million transfer units; default `0` |
 
-> **Fault injection direction (v0.1.0)**: `latency_ns`, `jitter_ns`, `drop_rate_ppm`, and `bitflip_rate_ppm` apply on the **TX path only** (bytes flowing from the AUT toward the wire device). RX-direction injection (simulator → AUT) is deferred to v0.2.0.
+> **Fault injection direction (v0.1.0)**: the common fault attrs apply to the **AUT-driven transmit path** for UART and to the **sysfs-injected input-transition path** for GPIO. They do not mutate simulator → AUT UART traffic or AUT-driven GPIO output transitions in `v0.1.0`.
 
-> **Burst definition (v0.1.0)**: one hrtimer callback = one character. The hrtimer fires at the character period `period_ns = ⌈bits_per_frame × 10⁹ / baud⌉` where `bits_per_frame = 1 (start) + databits + stopbits + (1 if parity ≠ none else 0)`. Each callback dequeues exactly one byte from the TX buffer (if non-empty), applies fault injection to it, and delivers it to the wire device.
+> **Transfer unit definition (v0.1.0)**: transfer-unit granularity is peripheral-specific. For UART, one transfer unit is one byte paced by the hrtimer. For GPIO, one transfer unit is one sysfs write to `value`, potentially affecting multiple bits of the same bank.
 
-> **`latency_ns` / `jitter_ns` semantics**: after a burst is delivered, the hrtimer is re-armed at `now + period_ns + latency_ns + uniform(0, jitter_ns)`. When `latency_ns=0` and `jitter_ns>0`, jitter still applies — there is no fast-path bypass for zero base latency. These delays affect when bytes reach the wire device; the AUT's `write()` sees backpressure only when the TX circular buffer fills.
+> **`latency_ns` / `jitter_ns` semantics**: delivery timing is peripheral-specific. For UART, these attrs delay byte delivery toward the wire device and therefore influence TX backpressure. For GPIO, they delay sysfs-injected input transitions before the logical line state changes; see the GPIO section below.
 
-> **Fault attr update timing**: writes to `latency_ns`, `jitter_ns`, `drop_rate_ppm`, or `bitflip_rate_ppm` take effect from the **next hrtimer callback** after the sysfs store returns; no in-flight burst is modified. Store uses `WRITE_ONCE()`; hrtimer callback reads with `READ_ONCE()`.
+> **Fault attr update timing**: writes to `latency_ns`, `jitter_ns`, `drop_rate_ppm`, or `bitflip_rate_ppm` take effect from the **next transfer scheduling point** after the sysfs store returns. For UART, that means the next hrtimer callback; for GPIO, the next sysfs write to `value`. No already-scheduled transfer unit is modified in place.
+
+> **GPIO delayed-write snapshot rule**: when a GPIO `value` write is accepted for delayed delivery, the kernel snapshots the requested logical bank value together with the current `latency_ns`, `jitter_ns`, `drop_rate_ppm`, `bitflip_rate_ppm`, `direction`, and `active_low` state before the sysfs store returns. A later change to those attrs does not rewrite a bank update that was already accepted and scheduled.
 
 > **Removed in v1**: `mode` (normal/record/replay) and `fault_policy` — record/replay and policy management are handled in userspace scripts, not the kernel.
 
@@ -125,19 +127,119 @@ Counters are reset by writing `0` to `stats/reset`. Counters wrap silently at `U
 
 `v0.1.0` includes `virtrtlab_gpio` as the second reference peripheral family. Unlike UART, GPIO is intentionally **state-oriented** rather than stream-oriented and does not require the daemon socket path in the MVP.
 
-Minimum expected observable surface before implementation starts:
+### Device model
 
-| Attribute | Access | Type | Allowed values |
-|---|---|---|---|
-| `direction` | rw | string | `in\|out` |
-| `value` | rw/ro | bool | `0\|1` |
-| `active_low` | rw | bool | `0\|1` |
-| `edge` | rw | string | `none\|rising\|falling\|both` |
-| `stats/` | ro | directory | transition and error counters |
+Each `gpioN` device models **one logical bank of 8 lines**. There is no per-line device in `v0.1.0`. Bank numbering is 0-based and follows the `num_gpio_banks` module parameter.
 
-> **Open:** define whether `virtrtlab_gpio` models one device per GPIO line or one device per GPIO bank, how line naming maps to `/sys/kernel/virtrtlab/devices/gpioN/`, and the exact counter set exposed under `stats/`.
+Ownership rules:
 
-> **Open:** define the precise interaction between common fault attrs (`latency_ns`, `jitter_ns`, `drop_rate_ppm`, `bitflip_rate_ppm`) and GPIO semantics. For GPIO, `drop_rate_ppm` and `bitflip_rate_ppm` likely translate to suppressed or inverted value transitions rather than byte-level mutation.
+- when a `direction` bit is `0`, the AUT observes that bit as an input and userspace may drive it by writing `value` through sysfs
+- when a `direction` bit is `1`, the AUT drives that bit as an output and sysfs can only observe it
+- `value`, edge detection, and all counters are expressed in **logical** bank state after `active_low` has been applied
+
+### Attributes
+
+| Attribute | Access | Type | Allowed values | Description |
+|---|---|---|---|---|
+| `direction` | rw | u8 mask | `0x00..0xFF` | Per-bit ownership mask. `1` = AUT output, `0` = AUT input |
+| `value` | rw/ro | u8 mask | `0x00..0xFF` | Read returns the current logical bank value. Write injects a logical bank value toward AUT-input bits only. Bits owned by the AUT are ignored on write and remain unchanged |
+| `active_low` | rw | u8 mask | `0x00..0xFF` | Per-bit logical inversion mask applied to readback, writes, and edge matching |
+| `edge_rising` | rw | u8 mask | `0x00..0xFF` | Per-bit mask enabling rising-edge event detection on AUT-input bits |
+| `edge_falling` | rw | u8 mask | `0x00..0xFF` | Per-bit mask enabling falling-edge event detection on AUT-input bits |
+| `stats/value_changes` | ro | u64 | n/a | Count of logical line transitions actually applied after fault handling |
+| `stats/edge_events` | ro | u64 | n/a | Count of individual bit transitions that match the enabled edge masks |
+| `stats/drops` | ro | u64 | n/a | Count of dropped `value` write operations suppressed by `drop_rate_ppm` |
+| `stats/reset` | wo | u8 | `0` | Writing `0` resets all GPIO counters atomically; any other value returns `-EINVAL` |
+
+Mask-format rules for `direction`, `value`, `active_low`, `edge_rising`, and `edge_falling`:
+
+- Writes accept only lowercase or uppercase hexadecimal in the exact form `0xNN`, where `NN` is two hex digits
+- Decimal, octal, signed, whitespace-padded, or shortened forms such as `1`, `01`, `0x1`, and `255` return `-EINVAL`
+- Reads return the canonical lowercase form `0xnn` followed by `\n`
+
+Bit numbering is LSB-first: bit 0 is mask `0x01`, bit 7 is mask `0x80`.
+
+All GPIO masks and counters are defined in the **logical** domain after `active_low` has been applied. In particular, a userspace write to `value` expresses the requested logical bank state, `value` readback reports the logical bank state, edge matching is performed on logical transitions, and `bitflip_rate_ppm` flips one random AUT-input bit in that logical bank value before delivery.
+
+### Fault attribute semantics
+
+For GPIO, the common fault attrs apply only to **sysfs writes to `value`** and only to bits configured as AUT inputs:
+
+- `latency_ns` delays delivery of the bank update
+- `jitter_ns` adds uniform delay variation on top of `latency_ns`
+- `drop_rate_ppm` suppresses the whole bank write, leaves the logical bank value unchanged, and increments `stats/drops`
+- `bitflip_rate_ppm` flips one random AUT-input bit within the requested bank value before delivery. If the flipped value produces no effective bit transition, the write succeeds but `stats/value_changes` does not increment for that bit
+
+These attrs do not alter AUT-driven output transitions in `v0.1.0`.
+
+If a delayed GPIO bank write is pending, all four decisions above are made from the snapshotted attribute values captured when that `value` write was accepted; later sysfs writes affect only subsequently accepted bank writes.
+
+### Direction, edge, and reset semantics
+
+- Writes to `edge_rising` and `edge_falling` are masked by `~direction`; output-owned bits are stored as `0`
+- A sysfs write to `value` updates only AUT-input bits; output-owned bits read back exactly as last driven by the AUT
+- Writes to `value` while the device is disabled (`enabled=0`) or while the bus state is `down` return `-EIO`
+- Bus `state=reset` clears `latency_ns`, `jitter_ns`, `drop_rate_ppm`, `bitflip_rate_ppm`, resets all GPIO counters, sets `enabled=1`, and preserves `direction`, `active_low`, edge masks, and the current logical bank value
+
+Counter units for GPIO are intentionally mixed and must be read literally:
+
+- `stats/value_changes` counts individual logical bit transitions that were actually applied to AUT-input bits
+- `stats/edge_events` counts individual logical bit transitions that matched the enabled edge masks
+- `stats/drops` counts suppressed `value` write operations, one increment per dropped bank write regardless of how many bits that write would have changed
+
+### Error behaviour
+
+The GPIO error model is based on a **standard memory-mapped banked GPIO controller** as exposed through Linux `gpiolib`, with Xilinx AXI GPIO used as a representative reference shape for `v0.1.0`. VirtRTLab specifies only the observable sysfs contract below; legacy `/sys/class/gpio` export semantics and line-reservation errors are out of scope.
+
+| Condition | Kernel behaviour |
+|---|---|
+| `direction`, `value`, `active_low`, `edge_rising`, or `edge_falling` write not matching the strict `0xNN` format | return `-EINVAL` |
+| `latency_ns`/`jitter_ns` write > 10 000 000 000 ns | return `-EINVAL` |
+| `drop_rate_ppm`/`bitflip_rate_ppm` write > 1 000 000 | return `-EINVAL` |
+| `stats/reset` write value other than `0` | return `-EINVAL` |
+| `read()` on `stats/reset` | returns `-EPERM` (write-only attribute; no `show()` callback registered) |
+| `value` write while `enabled=0` | return `-EIO` |
+| `value` write while bus `state=down` | return `-EIO` |
+| `value` write with one or more bits owned by the AUT (`direction=1`) | succeeds; those output-owned bits are ignored and retain the last AUT-driven logical state |
+| `edge_rising`/`edge_falling` write with one or more bits owned by the AUT (`direction=1`) | succeeds; those output-owned bits are stored as `0` |
+
+No `-EBUSY` condition is specified for GPIO in `v0.1.0`: VirtRTLab does not model per-line userspace export, descriptor reservation, or exclusive IRQ ownership at the sysfs interface level.
+
+### Test-oriented examples
+
+Drive one input bit high and count a rising edge:
+
+```sh
+echo 0x00 > /sys/kernel/virtrtlab/devices/gpio0/direction
+echo 0x01 > /sys/kernel/virtrtlab/devices/gpio0/edge_rising
+echo 0x01 > /sys/kernel/virtrtlab/devices/gpio0/value
+cat /sys/kernel/virtrtlab/devices/gpio0/stats/value_changes
+cat /sys/kernel/virtrtlab/devices/gpio0/stats/edge_events
+```
+
+Expected result: if bit 0 was previously low, both counters increment by 1.
+
+Drop a whole bank write:
+
+```sh
+echo 0x00 > /sys/kernel/virtrtlab/devices/gpio0/direction
+echo 1000000 > /sys/kernel/virtrtlab/devices/gpio0/drop_rate_ppm
+echo 0x55 > /sys/kernel/virtrtlab/devices/gpio0/value
+cat /sys/kernel/virtrtlab/devices/gpio0/value
+cat /sys/kernel/virtrtlab/devices/gpio0/stats/drops
+```
+
+Expected result: `value` remains unchanged and `stats/drops` increments by 1.
+
+Observe AUT-driven output bits while still driving an input bit from sysfs:
+
+```sh
+echo 0x0F > /sys/kernel/virtrtlab/devices/gpio0/direction
+echo 0x80 > /sys/kernel/virtrtlab/devices/gpio0/value
+cat /sys/kernel/virtrtlab/devices/gpio0/value
+```
+
+Expected result: bits 0..3 reflect the AUT-driven output state, and only bit 7 may be changed by the sysfs write.
 
 ## Rationale
 
@@ -147,6 +249,12 @@ The AUT configures the serial line via `tcsetattr()` — this is the standard PO
 **Why no `mode` or `fault_policy` in sysfs?**  
 Record/replay and named fault profiles are orchestration concepts. They are cleaner to implement in Python scripts that write individual sysfs attrs, rather than encoding policy state in the kernel. This keeps the kernel surface minimal and auditable.
 
+**Why an 8-bit bank instead of one device per line?**  
+An 8-bit bank is a pragmatic MVP shape: it matches common embedded register-style GPIO usage, keeps the sysfs surface compact, and allows simultaneous bit transitions without inventing a more complex userspace protocol.
+
+**Why use a `gpiolib` / Xilinx-style error model?**  
+For `v0.1.0`, VirtRTLab needs a simple GPIO contract that feels familiar to Linux driver authors and test engineers. A banked memory-mapped controller such as Xilinx AXI GPIO is representative for per-bit direction, bank value read/write, and edge-capable input lines. The spec therefore adopts that controller family as an inspiration for observable error cases, while intentionally excluding Linux legacy sysfs-export workflow details that do not match the VirtRTLab sysfs surface.
+
 ## Decisions
 
 **Buffer live-resize** — deferred to v0.2.0: `tx_buf_sz`/`rx_buf_sz` writes rejected while device is open (`-EBUSY`).
@@ -154,3 +262,5 @@ Record/replay and named fault profiles are orchestration concepts. They are clea
 **Baud rate change notification** — not in v0.1.0: `tcsetattr()` updates termios state and the sysfs `baud` attr atomically. `virtrtlabd` reads `baud` from sysfs on demand; no uevent or control byte is generated by the kernel.
 
 **PRNG scope** — the xorshift32 state lives at the bus level (`buses/vrtlbus0/seed`), shared across all devices on that bus. Devices on the same bus draw from the shared state in interleaved order; each device does not maintain its own PRNG. For reproducible CI results, write `seed` before activating stochastic fault injection and record it in test artifacts.
+
+**GPIO bank width** — fixed at 8 bits in `v0.1.0`: each `gpioN` instance models exactly 8 logical lines. Wider banks or configurable bank widths are deferred.
