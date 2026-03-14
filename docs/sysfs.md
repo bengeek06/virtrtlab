@@ -22,7 +22,7 @@ Sub-directories: `buses/`, `devices/`.
 |---|---|---|---|
 | `state` | rw | string | `up\|down\|reset` |
 | `clock_ns` | ro | u64 | `CLOCK_MONOTONIC` snapshot (ns) taken at the moment the attr is read; nanosecond-precision via `ktime_get_ns()`, not driven by the TX hrtimer |
-| `seed` | rw | u32 | RNG seed for stochastic fault profiles; the xorshift32 PRNG is re-seeded on write; one PRNG draw per drop/bitflip decision |
+| `seed` | rw | u32 | RNG seed for stochastic fault profiles; the xorshift32 PRNG is re-seeded on write; one PRNG draw per drop/bitflip decision. `0` is invalid and returns `-EINVAL` because xorshift32 must keep a non-zero internal state |
 
 ### `state` semantics
 
