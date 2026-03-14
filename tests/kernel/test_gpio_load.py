@@ -75,11 +75,16 @@ class TestGpioLoadDefault:
         if _module_loaded("virtrtlab_gpio"):
             _rmmod("virtrtlab_gpio")
 
+        # core must be present as a pre-requisite
+        core_was_loaded = _module_loaded("virtrtlab_core")
+        if not core_was_loaded:
+            _insmod(KO["core"])
+
         # Clear the kernel ring buffer so we only see messages from this insmod.
-        subprocess.run(["dmesg", "-C"], check=True)
+        subprocess.run(["sudo", "dmesg", "-C"], check=True)
 
         try:
-            _insmod(KO)
+            _insmod(KO["gpio"])
             lines = dmesg_lines()
             matching = [l for l in lines
                         if ("virtrtlab_gpio" in l and
@@ -92,6 +97,8 @@ class TestGpioLoadDefault:
         finally:
             if _module_loaded("virtrtlab_gpio"):
                 _rmmod("virtrtlab_gpio")
+            if not core_was_loaded:
+                _rmmod("virtrtlab_core")
 
     def test_sysfs_gpio0_dir_exists(self, gpio_module):
         """gpio0 device directory must exist under sysfs/devices/."""

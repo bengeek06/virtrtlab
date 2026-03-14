@@ -94,11 +94,21 @@ struct virtrtlab_gpio_dev {
 	 *   requested_value, direction, active_low, bitflip_rate_ppm.
 	 * latency_ns/jitter_ns are consumed for hrtimer setup, not stored.
 	 * edge_rising/edge_falling are read from live state at apply() time.
+	 *
+	 * @snap_gen is incremented each time a new snapshot is taken.  It lets
+	 * virtrtlab_gpio_apply() detect and discard stale dispatches:
+	 *   - a duplicate apply (same work item running twice)
+	 *   - an apply superseded by a newer snapshot accepted while computation
+	 *     was in progress between the two lock acquisitions in apply().
+	 * @apply_gen tracks the generation of the last successfully committed
+	 * apply so that the stale-dispatch check is lock-safe.
 	 */
 	u8			snap_requested;
 	u8			snap_direction;
 	u8			snap_active_low;
 	u32			snap_bitflip_ppm;
+	u32			snap_gen;	/* generation counter — under ->lock */
+	u32			apply_gen;	/* last committed generation — under ->lock */
 };
 
 #define to_gpio_dev(d)	container_of(d, struct virtrtlab_gpio_dev, dev)
@@ -460,6 +470,7 @@ static ssize_t value_store(struct device *dev, struct device_attribute *attr,
 	gdev->snap_direction   = gdev->direction;
 	gdev->snap_active_low  = gdev->active_low;
 	gdev->snap_bitflip_ppm = gdev->bitflip_rate_ppm;
+	gdev->snap_gen++;          /* advance generation before unlocking */
 	latency_ns             = gdev->latency_ns;
 	jitter_ns              = gdev->jitter_ns;
 
@@ -473,16 +484,16 @@ static ssize_t value_store(struct device *dev, struct device_attribute *attr,
 		/*
 		 * 5b — (re)arm the per-bank hrtimer.
 		 *
-		 * To implement "last-write-wins" for delayed writes, we must
-		 * explicitly cancel both the outstanding timer and any pending
-		 * apply_work instance that may have been queued by a previous
-		 * timer expiry. Otherwise, an older snapshot could still be
-		 * applied after this write, or this write's timer event could
-		 * be dropped if the work item is already pending.
+		 * hrtimer_start() atomically cancels any already-pending timer
+		 * and re-arms it; no explicit hrtimer_cancel() is needed here.
+		 *
+		 * We do NOT call cancel_work_sync() — that would block sysfs
+		 * writers if an apply_work instance from a previous timer expiry
+		 * is currently running, turning rapid consecutive writes into a
+		 * serialised queue.  Instead, the snap_gen/apply_gen guard in
+		 * virtrtlab_gpio_apply() detects and discards stale dispatches
+		 * cheaply, without blocking the caller.
 		 */
-		hrtimer_cancel(&gdev->delay_timer);
-		cancel_work_sync(&gdev->apply_work);
-
 		delay_ns = latency_ns;
 		if (jitter_ns) {
 			/*
@@ -610,8 +621,20 @@ static void virtrtlab_gpio_apply(struct virtrtlab_gpio_dev *gdev)
 	u8 rising_events, falling_events;
 	u8 snap_req, snap_dir, snap_al, edge_r, edge_f;
 	u32 bitflip_ppm;
+	u32 gen;
 
 	mutex_lock(&gdev->lock);
+
+	gen = gdev->snap_gen;
+	if (gen == gdev->apply_gen) {
+		/*
+		 * Stale dispatch: either this snapshot was already committed by
+		 * a previous run of this work item, or no deferred write is
+		 * pending.  Drop silently.
+		 */
+		mutex_unlock(&gdev->lock);
+		return;
+	}
 
 	snap_req     = gdev->snap_requested;
 	snap_dir     = gdev->snap_direction;
@@ -701,6 +724,16 @@ static void virtrtlab_gpio_apply(struct virtrtlab_gpio_dev *gdev)
 	falling_events = changed & ~new_logical & edge_f;
 
 	mutex_lock(&gdev->lock);
+	/*
+	 * Guard: a newer snapshot may have been accepted while we were
+	 * computing (between the two lock acquisitions).  If so, our result
+	 * is stale — discard it and let the newer dispatch win.
+	 */
+	if (gdev->snap_gen != gen) {
+		mutex_unlock(&gdev->lock);
+		return;
+	}
+	gdev->apply_gen = gen;
 	gdev->value = new_val;
 	gdev->stat_value_changes += hweight8(changed);
 	gdev->stat_edge_events   += hweight8(rising_events) + hweight8(falling_events);
@@ -857,6 +890,12 @@ static int virtrtlab_gpio_bus_notifier_call(struct notifier_block *nb,
 	gdev->stat_edge_events   = 0;
 	gdev->stat_drops         = 0;
 	gdev->enabled            = true;
+	/*
+	 * Mark the current snapshot generation as already committed so that
+	 * any apply() instance that squeezed past cancel_work_sync() sees a
+	 * stale-dispatch and exits without corrupting the just-reset state.
+	 */
+	gdev->apply_gen = gdev->snap_gen;
 	mutex_unlock(&gdev->lock);
 
 	return NOTIFY_OK;

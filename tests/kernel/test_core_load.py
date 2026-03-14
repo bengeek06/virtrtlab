@@ -57,7 +57,7 @@ class TestCoreLoad:
         baseline = dmesg_lines()
         baseline_len = len(baseline)
 
-        _insmod(KO)
+        _insmod(KO["core"])
         try:
             lines = dmesg_lines()
             # If dmesg_lines() returns a sliding window (e.g. last 200 lines),
