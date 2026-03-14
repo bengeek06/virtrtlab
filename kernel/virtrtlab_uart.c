@@ -2,10 +2,46 @@
 /*
  * virtrtlab_uart.c — VirtRTLab virtual UART peripheral
  *
- * Implements the sysfs device model, per-device stats counters (issue #3),
- * and the inline fault injection engine (issue #4).
- * The TTY/wire-device transport path is tracked in issue #2; tx_timer and
- * tx_work are structural placeholders for that integration.
+ * Implements the sysfs device model and per-device stats counters (issue #3).
+ *
+ * The inline fault injection engine (issue #4) is NOT YET implemented.
+ * It depends on the TX circular buffer and wire misc device introduced in
+ * issue #2.  The implementation sequence is:
+ *
+ *   Step A — issue #2: TTY driver + wire misc device + circular buffers
+ *     A1. TODO — allocate tty_driver (tty_alloc_driver) + tty_port per device
+ *         (tty_port_init) + tty_operations skeleton (install/open/close/hangup/
+ *         write/write_room/chars_in_buffer/set_termios stubs).
+ *     A2. TODO — add wire_open_count (atomic_t); -EBUSY guard in
+ *         tx_buf_sz_store / rx_buf_sz_store.
+ *     A3. Add TX circular ringbuf (spinlock-protected, power-of-two):
+ *         tx_buf[], tx_head, tx_tail, tx_lock.
+ *     A4. Add RX circular ringbuf (same shape): rx_buf[], rx_head, rx_tail,
+ *         rx_lock; RX overflow evicts oldest byte and increments stat_overruns.
+ *     A5. Register /dev/virtrtlab-wireN as a misc char device with
+ *         read/write/poll file_operations.
+ *     A6. In tty_operations.write(): push bytes into TX ringbuf, arm
+ *         tx_timer if not already running (HRTIMER_MODE_REL, period from
+ *         baud rate and burst size).
+ *     A7. In tty_operations.set_termios(): update udev->baud / parity /
+ *         databits / stopbits mirrors under ->lock.
+ *
+ *   Step B — issue #4: fault injection engine in virtrtlab_uart_tx_work_fn
+ *     B1. Read one burst from TX ringbuf (up to tx_buf_sz/8 bytes).
+ *     B2. atomic64_add(burst_len, &udev->stat_tx_bytes) — BEFORE any fault.
+ *     B3. Drop decision: draw u32 rnd = virtrtlab_bus_next_prng_u32();
+ *         if (udev->drop_rate_ppm && (rnd % 1000000U) < udev->drop_rate_ppm)
+ *             atomic64_add(burst_len, &udev->stat_drops); return.
+ *         NOTE: use % 1000000U (not & 0xFFFFF) to avoid the ~4.76% bias.
+ *     B4. Bitflip decision: draw another u32;
+ *         if (udev->bitflip_rate_ppm && (rnd % 1000000U) < udev->bitflip_rate_ppm)
+ *             flip one random bit in a random byte of the burst.
+ *     B5. Write (possibly corrupted) burst to the wire misc device kfifo;
+ *         wake wire device poll waitqueue (POLLIN).
+ *     B6. In virtrtlab_uart_tx_timer_cb: compute next expiry from baud rate
+ *         and remaining bytes in TX ringbuf; add latency_ns + jitter_ns
+ *         (jitter sampled from virtrtlab_bus_next_prng_u32() % (jitter_ns+1));
+ *         rearm hrtimer or stop if ringbuf is empty.
  *
  * Part of VirtRTLab — Linux real-time peripheral simulation framework
  */
@@ -75,6 +111,30 @@ struct virtrtlab_uart_dev {
 	 */
 	u32			tx_buf_sz;
 	u32			rx_buf_sz;
+
+	/*
+	 * TODO issue #2-A1: TTY port — one tty_port per UART instance.
+	 *   struct tty_port		port;
+	 * Managed by tty_port_init() / tty_port_destroy().
+	 *
+	 * TODO issue #2-A2: wire device open accounting.
+	 *   atomic_t		wire_open_count;
+	 * Incremented on /dev/virtrtlab-wireN open(), decremented on release().
+	 * Used to enforce -EBUSY in tx_buf_sz_store / rx_buf_sz_store.
+	 *
+	 * TODO issue #2-A3/A4: TX and RX circular ringbufs.
+	 *   u8			*tx_buf;
+	 *   u32			tx_head;
+	 *   u32			tx_tail;
+	 *   spinlock_t		tx_lock;
+	 *   u8			*rx_buf;
+	 *   u32			rx_head;
+	 *   u32			rx_tail;
+	 *   spinlock_t		rx_lock;
+	 *
+	 * TODO issue #2-A5: wire misc char device.
+	 *   struct miscdevice	wire_dev;
+	 */
 
 	/*
 	 * Per-device stats counters (issue #3).
@@ -389,6 +449,11 @@ static ssize_t tx_buf_sz_store(struct device *dev, struct device_attribute *attr
 		return ret;
 	if (!virtrtlab_uart_buf_sz_valid(val))
 		return -EINVAL;
+	/*
+	 * TODO issue #2-A2: reject resize while the wire device is open.
+	 *   if (atomic_read(&udev->wire_open_count))
+	 *       return -EBUSY;
+	 */
 	mutex_lock(&udev->lock);
 	udev->tx_buf_sz = val;
 	mutex_unlock(&udev->lock);
@@ -420,6 +485,11 @@ static ssize_t rx_buf_sz_store(struct device *dev, struct device_attribute *attr
 		return ret;
 	if (!virtrtlab_uart_buf_sz_valid(val))
 		return -EINVAL;
+	/*
+	 * TODO issue #2-A2: reject resize while the wire device is open.
+	 *   if (atomic_read(&udev->wire_open_count))
+	 *       return -EBUSY;
+	 */
 	mutex_lock(&udev->lock);
 	udev->rx_buf_sz = val;
 	mutex_unlock(&udev->lock);
@@ -547,27 +617,54 @@ static const struct attribute_group *uart_groups[] = {
 };
 
 /* -----------------------------------------------------------------------
- * Fault injection TX engine (issue #4)
+ * Fault injection TX engine (issue #4) — NOT YET IMPLEMENTED
  *
- * TX delivery sequence per hrtimer burst:
- *   1. Draw one u32 from virtrtlab_bus_next_prng_u32().
- *      bits[19:0]: gate against drop_rate_ppm.  Threshold:
- *        (rnd & 0xFFFFF) < drop_ppm * 0xFFFFF / 1000000
- *      If drop → atomic64_add(burst_len, stat_drops); return.
- *   2. Draw another u32.
- *      bits[19:0]: gate against bitflip_rate_ppm (same formula).
- *      bits[31:20]: byte index within burst to flip a random bit.
- *   3. Deliver the (possibly corrupted) burst to the wire misc device.
- *      Increment stat_tx_bytes by burst_len before step 1.
+ * Depends on the TX circular ringbuf and wire misc device from issue #2.
+ * See the implementation plan in the file header comment above.
  *
- * The tx_work and tx_timer below are structural placeholders; the actual
- * circular-buffer wiring is done in issue #2.
+ * tx_timer and tx_work are structural placeholders; their bodies will be
+ * filled in once issue #2 lands.
  * -----------------------------------------------------------------------
  */
 
 static void virtrtlab_uart_tx_work_fn(struct work_struct *work)
 {
-	/* Placeholder: wired to the TX circular buffer in issue #2. */
+	/*
+	 * TODO issue #4-B: implement the fault injection TX engine.
+	 *
+	 * Execution context: process context via workqueue.
+	 * Called from: virtrtlab_uart_tx_timer_cb → schedule_work().
+	 *
+	 * Implementation sequence (see file header Step B for full detail):
+	 *
+	 *   1. Dequeue one burst from the TX circular ringbuf (spin_lock_irqsave
+	 *      tx_lock; read up to tx_buf_sz/8 bytes; release lock).
+	 *      If ringbuf is empty, return without rearming the timer.
+	 *
+	 *   2. atomic64_add(burst_len, &udev->stat_tx_bytes)  ← BEFORE faults.
+	 *
+	 *   3. Drop decision:
+	 *        u32 rnd = virtrtlab_bus_next_prng_u32();
+	 *        if (drop_rate_ppm && (rnd % 1000000U) < drop_rate_ppm) {
+	 *            atomic64_add(burst_len, &udev->stat_drops);
+	 *            goto rearm;  // do NOT deliver to wire device
+	 *        }
+	 *
+	 *   4. Bitflip decision:
+	 *        rnd = virtrtlab_bus_next_prng_u32();
+	 *        if (bitflip_rate_ppm && (rnd % 1000000U) < bitflip_rate_ppm) {
+	 *            u8 byte_idx = (rnd >> 8) % burst_len;
+	 *            u8 bit_idx  = rnd & 0x7;
+	 *            burst[byte_idx] ^= (1U << bit_idx);
+	 *        }
+	 *
+	 *   5. Write burst to wire misc device kfifo; wake POLLIN waitqueue.
+	 *      Non-blocking: if kfifo is full, increment stat_drops and discard.
+	 *
+	 * rearm:
+	 *   6. If TX ringbuf still has data, rearm hrtimer via
+	 *      virtrtlab_uart_tx_timer_cb logic (see below).
+	 */
 }
 
 static enum hrtimer_restart virtrtlab_uart_tx_timer_cb(struct hrtimer *timer)
@@ -575,6 +672,23 @@ static enum hrtimer_restart virtrtlab_uart_tx_timer_cb(struct hrtimer *timer)
 	struct virtrtlab_uart_dev *udev =
 		container_of(timer, struct virtrtlab_uart_dev, tx_timer);
 
+	/*
+	 * TODO issue #4-B6 / issue #2-A6: compute next hrtimer expiry.
+	 *
+	 * The timer period must pace TX bursts at the current baud rate:
+	 *   burst_ns = (burst_len * 10 * NSEC_PER_SEC) / udev->baud
+	 *              (10 bits per byte: 1 start + 8 data + 1 stop)
+	 *
+	 * Add latency_ns and a jitter sample:
+	 *   u64 jitter = 0;
+	 *   if (udev->jitter_ns)
+	 *       jitter = virtrtlab_bus_next_prng_u32() % (udev->jitter_ns + 1);
+	 *   delay = burst_ns + udev->latency_ns + jitter;
+	 *
+	 * If TX ringbuf is empty after dequeue, return HRTIMER_NORESTART.
+	 * Otherwise: hrtimer_forward_now(timer, ns_to_ktime(delay));
+	 *            return HRTIMER_RESTART;
+	 */
 	schedule_work(&udev->tx_work);
 	return HRTIMER_NORESTART;
 }
@@ -679,7 +793,7 @@ static int __init virtrtlab_uart_init(void)
 		udev->databits = 8;
 		udev->stopbits = 1;
 
-		/* fault injection engine */
+		/* fault injection engine placeholders */
 		hrtimer_init(&udev->tx_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 		udev->tx_timer.function = virtrtlab_uart_tx_timer_cb;
 		INIT_WORK(&udev->tx_work, virtrtlab_uart_tx_work_fn);
@@ -710,7 +824,7 @@ static int __init virtrtlab_uart_init(void)
 		}
 
 		uart_devs[i] = udev;
-		pr_info("uart%u registered on virtrtlab bus\n", i);
+		pr_info("uart%u registered\n", i);
 	}
 
 	return 0;
