@@ -284,7 +284,30 @@ class TestGpioInvalidParam:
         )
         loaded = _module_loaded("virtrtlab_gpio")
         if loaded:
+            # Successful load: insmod should have returned success.
+            assert result.returncode == 0, (
+                "virtrtlab_gpio loaded but insmod returned non-zero: "
+                f"rc={result.returncode}, stderr={result.stderr!r}"
+            )
             _rmmod("virtrtlab_gpio")
+        else:
+            # Expected path for invalid parameters: insmod must fail, and
+            # stderr should indicate an invalid argument / -EINVAL.
+            assert result.returncode != 0, (
+                "virtrtlab_gpio did not load, but insmod returned zero; "
+                "this suggests a non-parameter-related failure was not "
+                "properly reported."
+            )
+            stderr_lower = (result.stderr or "").lower()
+            assert (
+                "invalid" in stderr_lower
+                or "e-inval" in stderr_lower
+                or "invalid argument" in stderr_lower
+                or "einval" in stderr_lower
+            ), (
+                "insmod failed but stderr does not clearly indicate an "
+                f"invalid parameter / EINVAL: {result.stderr!r}"
+            )
         return loaded
 
     @pytest.mark.parametrize("bad_param", [
