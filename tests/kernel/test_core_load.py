@@ -50,14 +50,33 @@ class TestCoreLoad:
         """insmod succeeds and module appears in /proc/modules."""
         assert _module_loaded("virtrtlab_core")
 
-    def test_dmesg_load_message(self, core_module):
+    def test_dmesg_load_message(self):
         """dmesg must contain the 'loaded' banner emitted by pr_info."""
-        lines = dmesg_lines()
-        matching = [l for l in lines if "virtrtlab_core" in l and "loaded" in l]
-        assert matching, (
-            "Expected 'virtrtlab_core: loaded' in dmesg after insmod, got:\n"
-            + "\n".join(lines[-20:])
-        )
+        # Capture a dmesg baseline before loading the module to avoid
+        # matching banners from earlier tests/runs.
+        baseline = dmesg_lines()
+        baseline_len = len(baseline)
+
+        _insmod(KO)
+        try:
+            lines = dmesg_lines()
+            # If dmesg_lines() returns a sliding window (e.g. last 200 lines),
+            # baseline_len may be greater than the current length. In that case,
+            # fall back to searching the full window.
+            if baseline_len < len(lines):
+                new_lines = lines[baseline_len:]
+            else:
+                new_lines = lines
+
+            matching = [
+                l for l in new_lines if "virtrtlab_core" in l and "loaded" in l
+            ]
+            assert matching, (
+                "Expected 'virtrtlab_core: loaded' in dmesg after insmod, got:\n"
+                + "\n".join(new_lines[-20:])
+            )
+        finally:
+            _rmmod("virtrtlab_core")
 
     @pytest.mark.parametrize("path", CORE_SYSFS_PATHS)
     def test_sysfs_path_exists(self, core_module, path):
