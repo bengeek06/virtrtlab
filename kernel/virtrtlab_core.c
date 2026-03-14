@@ -40,7 +40,8 @@ EXPORT_SYMBOL_GPL(virtrtlab_bus_type);
 
 static struct kobject *virtrtlab_kobj;
 static struct kobject *virtrtlab_buses_kobj;
-static struct kobject *virtrtlab_devices_kobj;
+struct kobject *virtrtlab_devices_kobj;
+EXPORT_SYMBOL_GPL(virtrtlab_devices_kobj);
 
 static ssize_t version_show(struct kobject *kobj, struct kobj_attribute *attr,
 			    char *buf)
