@@ -4,27 +4,12 @@
  *
  * Implements the sysfs device model and per-device stats counters (issue #3).
  *
- * The inline fault injection engine (issue #4) is NOT YET implemented.
- * It depends on the TX circular buffer and wire misc device introduced in
- * issue #2.  The implementation sequence is:
+ * Issue #2 (TTY driver (/dev/ttyVIRTLABx) + wire misc device
+ * (/dev/virtrtlab-wireN) + kfifos + set_termios mirrors) is COMPLETE.
+ * Issue #3 (per-device stats counters) is COMPLETE.
  *
- *   Step A — issue #2: TTY driver + wire misc device + circular buffers
- *     A1. TODO — allocate tty_driver (tty_alloc_driver) + tty_port per device
- *         (tty_port_init) + tty_operations skeleton (install/open/close/hangup/
- *         write/write_room/chars_in_buffer/set_termios stubs).
- *     A2. TODO — add wire_open_count (atomic_t); -EBUSY guard in
- *         tx_buf_sz_store / rx_buf_sz_store.
- *     A3. Add TX circular ringbuf (spinlock-protected, power-of-two):
- *         tx_buf[], tx_head, tx_tail, tx_lock.
- *     A4. Add RX circular ringbuf (same shape): rx_buf[], rx_head, rx_tail,
- *         rx_lock; RX overflow evicts oldest byte and increments stat_overruns.
- *     A5. Register /dev/virtrtlab-wireN as a misc char device with
- *         read/write/poll file_operations.
- *     A6. In tty_operations.write(): push bytes into TX ringbuf, arm
- *         tx_timer if not already running (HRTIMER_MODE_REL, period from
- *         baud rate and burst size).
- *     A7. In tty_operations.set_termios(): update udev->baud / parity /
- *         databits / stopbits mirrors under ->lock.
+ * The inline fault injection engine (issue #4) is NOT YET implemented.
+ * Pending work:
  *
  *   Step B — issue #4: fault injection engine in virtrtlab_uart_tx_work_fn
  *     B1. Read one burst from TX ringbuf (up to tx_buf_sz/8 bytes).
@@ -52,12 +37,20 @@
 #include <linux/device.h>
 #include <linux/hrtimer.h>
 #include <linux/init.h>
+#include <linux/kfifo.h>
+#include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/notifier.h>
+#include <linux/poll.h>
 #include <linux/printk.h>
+#include <linux/serial.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/tty.h>
+#include <linux/tty_driver.h>
+#include <linux/tty_flip.h>
+#include <linux/wait.h>
 #include <linux/workqueue.h>
 #include "virtrtlab_core.h"
 
@@ -71,6 +64,12 @@
 
 /* Maximum number of UART instances this module can create */
 #define VIRTRTLAB_UART_MAX_DEVICES	4U
+
+/*
+ * Burst size for one TX work invocation.  Kept small to bound latency
+ * and per-call stack usage while still amortising spinlock overhead.
+ */
+#define VIRTRTLAB_UART_BURST_SZ		64U
 
 /*
  * tty_std_termios defaults reflected before any AUT open (or after bus reset).
@@ -112,29 +111,44 @@ struct virtrtlab_uart_dev {
 	u32			tx_buf_sz;
 	u32			rx_buf_sz;
 
+	/* issue #2-A1: TTY port — one per UART instance */
+	struct tty_port		port;
+
+	/* issue #2-A2: wire device exclusive-open accounting */
+	atomic_t		wire_open_count;
+
 	/*
-	 * TODO issue #2-A1: TTY port — one tty_port per UART instance.
-	 *   struct tty_port		port;
-	 * Managed by tty_port_init() / tty_port_destroy().
-	 *
-	 * TODO issue #2-A2: wire device open accounting.
-	 *   atomic_t		wire_open_count;
-	 * Incremented on /dev/virtrtlab-wireN open(), decremented on release().
-	 * Used to enforce -EBUSY in tx_buf_sz_store / rx_buf_sz_store.
-	 *
-	 * TODO issue #2-A3/A4: TX and RX circular ringbufs.
-	 *   u8			*tx_buf;
-	 *   u32			tx_head;
-	 *   u32			tx_tail;
-	 *   spinlock_t		tx_lock;
-	 *   u8			*rx_buf;
-	 *   u32			rx_head;
-	 *   u32			rx_tail;
-	 *   spinlock_t		rx_lock;
-	 *
-	 * TODO issue #2-A5: wire misc char device.
-	 *   struct miscdevice	wire_dev;
+	 * Set to 1 in port_activate(), cleared (under rx_lock) in
+	 * port_shutdown().  Guards wire_read() against accessing a freed
+	 * rx_fifo (B1 UAF fix) and gates buf_sz resize.
 	 */
+	atomic_t		port_active;
+
+	/*
+	 * issue #2-A3: TX kfifo — AUT → wire (power-of-two, allocated in
+	 *   tty_port.activate() so the current tx_buf_sz takes effect on
+	 *   the next open of /dev/ttyVIRTLABx).
+	 */
+	DECLARE_KFIFO_PTR(tx_fifo, u8);
+	spinlock_t		tx_lock;	/* protects tx_fifo */
+
+	/*
+	 * issue #2-A4: RX kfifo — wire → AUT (power-of-two).
+	 *   Overflow evicts the new bytes and increments stat_overruns
+	 *   (handled in wire_write()).
+	 */
+	DECLARE_KFIFO_PTR(rx_fifo, u8);
+	spinlock_t		rx_lock;	/* protects rx_fifo */
+
+	/* wake wire_read() and wire_poll() when tx_fifo gets data */
+	wait_queue_head_t	wire_read_wq;
+
+	/* set to 1 on bus RESET to make wire_read() return EOF (0) */
+	atomic_t		wire_reset_pending;
+
+	/* issue #2-A5: /dev/virtrtlab-wireN misc char device */
+	struct miscdevice	wire_dev;
+	char			wire_name[24];
 
 	/*
 	 * Per-device stats counters (issue #3).
@@ -449,11 +463,10 @@ static ssize_t tx_buf_sz_store(struct device *dev, struct device_attribute *attr
 		return ret;
 	if (!virtrtlab_uart_buf_sz_valid(val))
 		return -EINVAL;
-	/*
-	 * TODO issue #2-A2: reject resize while the wire device is open.
-	 *   if (atomic_read(&udev->wire_open_count))
-	 *       return -EBUSY;
-	 */
+	/* Reject resize while kfifos are live. */
+	if (atomic_read(&udev->wire_open_count) ||
+	    atomic_read(&udev->port_active))
+		return -EBUSY;
 	mutex_lock(&udev->lock);
 	udev->tx_buf_sz = val;
 	mutex_unlock(&udev->lock);
@@ -485,11 +498,10 @@ static ssize_t rx_buf_sz_store(struct device *dev, struct device_attribute *attr
 		return ret;
 	if (!virtrtlab_uart_buf_sz_valid(val))
 		return -EINVAL;
-	/*
-	 * TODO issue #2-A2: reject resize while the wire device is open.
-	 *   if (atomic_read(&udev->wire_open_count))
-	 *       return -EBUSY;
-	 */
+	/* Reject resize while kfifos are live. */
+	if (atomic_read(&udev->wire_open_count) ||
+	    atomic_read(&udev->port_active))
+		return -EBUSY;
 	mutex_lock(&udev->lock);
 	udev->rx_buf_sz = val;
 	mutex_unlock(&udev->lock);
@@ -617,6 +629,224 @@ static const struct attribute_group *uart_groups[] = {
 };
 
 /* -----------------------------------------------------------------------
+ * TTY driver (issue #2) — /dev/ttyVIRTLABx
+ * -----------------------------------------------------------------------
+ */
+
+static struct tty_driver *virtrtlab_tty_driver;
+
+/*
+ * tty_port_operations:
+ *   activate() — called on first open; allocates TX/RX kfifos at the sizes
+ *                currently configured via tx_buf_sz / rx_buf_sz sysfs attrs.
+ *   shutdown()  — called on last close; frees kfifos and stops the timer.
+ */
+static int virtrtlab_port_activate(struct tty_port *port, struct tty_struct *tty)
+{
+	struct virtrtlab_uart_dev *udev =
+		container_of(port, struct virtrtlab_uart_dev, port);
+	u32 tx_sz, rx_sz;
+	int ret;
+
+	mutex_lock(&udev->lock);
+	tx_sz = udev->tx_buf_sz;
+	rx_sz = udev->rx_buf_sz;
+	mutex_unlock(&udev->lock);
+
+	ret = kfifo_alloc(&udev->tx_fifo, tx_sz, GFP_KERNEL);
+	if (ret)
+		return ret;
+	ret = kfifo_alloc(&udev->rx_fifo, rx_sz, GFP_KERNEL);
+	if (ret) {
+		kfifo_free(&udev->tx_fifo);
+		return ret;
+	}
+	atomic_set(&udev->port_active, 1);
+	return 0;
+}
+
+static void virtrtlab_port_shutdown(struct tty_port *port)
+{
+	struct virtrtlab_uart_dev *udev =
+		container_of(port, struct virtrtlab_uart_dev, port);
+	unsigned long flags;
+	unsigned int pending;
+
+	hrtimer_cancel(&udev->tx_timer);
+	cancel_work_sync(&udev->tx_work);
+
+	/* Account for bytes that will never reach the wire. */
+	pending = kfifo_len(&udev->tx_fifo);
+	if (pending)
+		atomic64_add(pending, &udev->stat_drops);
+	kfifo_free(&udev->tx_fifo);
+
+	/*
+	 * Clear port_active and free rx_fifo under rx_lock so that a
+	 * concurrent wire_read() cannot race with kfifo_free() on SMP.
+	 * wire_read() checks port_active under the same lock before any
+	 * kfifo access, eliminating the use-after-free (B1 fix).
+	 */
+	spin_lock_irqsave(&udev->rx_lock, flags);
+	atomic_set(&udev->port_active, 0);
+	kfifo_free(&udev->rx_fifo);
+	spin_unlock_irqrestore(&udev->rx_lock, flags);
+	wake_up_interruptible(&udev->wire_read_wq);
+}
+
+static const struct tty_port_operations virtrtlab_port_ops = {
+	.activate = virtrtlab_port_activate,
+	.shutdown = virtrtlab_port_shutdown,
+};
+
+/*
+ * tty_operations — install wires tty->driver_data; open/close/hangup are
+ * handled by tty_port helpers for free.  write, write_room, chars_in_buffer,
+ * and set_termios are filled in at steps 3 and 4.
+ */
+static int virtrtlab_tty_install(struct tty_driver *driver,
+				 struct tty_struct *tty)
+{
+	struct virtrtlab_uart_dev *udev = uart_devs[tty->index];
+
+	tty->driver_data = udev;
+	return tty_port_install(&udev->port, driver, tty);
+}
+
+/*
+ * open/close/hangup — wrappers required because kernel ≥ 6.12 changed
+ * tty_operations.open/close/hangup signatures to omit the tty_port * arg,
+ * while tty_port_open/close/hangup still take it.
+ */
+static int virtrtlab_tty_open(struct tty_struct *tty, struct file *filp)
+{
+	struct virtrtlab_uart_dev *udev = tty->driver_data;
+
+	return tty_port_open(&udev->port, tty, filp);
+}
+
+static void virtrtlab_tty_close(struct tty_struct *tty, struct file *filp)
+{
+	struct virtrtlab_uart_dev *udev = tty->driver_data;
+
+	tty_port_close(&udev->port, tty, filp);
+}
+
+static void virtrtlab_tty_hangup(struct tty_struct *tty)
+{
+	struct virtrtlab_uart_dev *udev = tty->driver_data;
+
+	tty_port_hangup(&udev->port);
+}
+
+/*
+ * virtrtlab_uart_byte_ns - time in nanoseconds to transmit one UART byte
+ *
+ * Uses 10 bits per byte (1 start + 8 data + 1 stop).  Falls back to 9600 baud
+ * when the configured baud rate is zero.
+ */
+static u64 virtrtlab_uart_byte_ns(u32 baud)
+{
+	if (!baud)
+		baud = 9600;
+	return div64_u64(10ULL * NSEC_PER_SEC, (u64)baud);
+}
+
+static ssize_t virtrtlab_tty_write(struct tty_struct *tty, const u8 *buf,
+				   size_t count)
+{
+	struct virtrtlab_uart_dev *udev = tty->driver_data;
+	unsigned int copied;
+	u32 baud;
+
+	/* B2 fix: reject writes while the bus is not operational. */
+	if (!virtrtlab_bus_is_up())
+		return -EIO;
+
+	copied = kfifo_in_spinlocked(&udev->tx_fifo, buf, count, &udev->tx_lock);
+	if (copied) {
+		mutex_lock(&udev->lock);
+		baud = udev->baud;
+		mutex_unlock(&udev->lock);
+		/*
+		 * hrtimer_start() on an already-active timer is safe: the
+		 * timer is rearmed with the new expiry.  Skipping the
+		 * hrtimer_active() pre-check removes the TOCTOU window
+		 * between the check and the arm (m4 fix).
+		 */
+		hrtimer_start(&udev->tx_timer,
+			      ns_to_ktime(virtrtlab_uart_byte_ns(baud)),
+			      HRTIMER_MODE_REL);
+	}
+	return copied;
+}
+
+static unsigned int virtrtlab_tty_write_room(struct tty_struct *tty)
+{
+	struct virtrtlab_uart_dev *udev = tty->driver_data;
+
+	return kfifo_avail(&udev->tx_fifo);
+}
+
+static unsigned int virtrtlab_tty_chars_in_buffer(struct tty_struct *tty)
+{
+	struct virtrtlab_uart_dev *udev = tty->driver_data;
+
+	return kfifo_len(&udev->tx_fifo);
+}
+
+static void virtrtlab_tty_set_termios(struct tty_struct *tty,
+				      const struct ktermios *old)
+{
+	struct virtrtlab_uart_dev *udev = tty->driver_data;
+	u32 baud;
+	const char *parity;
+	u8 databits, stopbits;
+
+	baud = tty_termios_baud_rate(&tty->termios);
+
+	if (tty->termios.c_cflag & PARENB)
+		parity = (tty->termios.c_cflag & PARODD) ? "odd" : "even";
+	else
+		parity = "none";
+
+	switch (tty->termios.c_cflag & CSIZE) {
+	case CS5:
+		databits = 5;
+		break;
+	case CS6:
+		databits = 6;
+		break;
+	case CS7:
+		databits = 7;
+		break;
+	default:
+		databits = 8;
+		break;
+	}
+
+	stopbits = (tty->termios.c_cflag & CSTOPB) ? 2 : 1;
+
+	mutex_lock(&udev->lock);
+	udev->baud     = baud;
+	strscpy(udev->parity, parity, sizeof(udev->parity));
+	udev->databits = databits;
+	udev->stopbits = stopbits;
+	mutex_unlock(&udev->lock);
+}
+
+static const struct tty_operations virtrtlab_tty_ops = {
+	.install	 = virtrtlab_tty_install,
+	.open		 = virtrtlab_tty_open,
+	.close		 = virtrtlab_tty_close,
+	.hangup		 = virtrtlab_tty_hangup,
+	.write		 = virtrtlab_tty_write,
+	.write_room	 = virtrtlab_tty_write_room,
+	.chars_in_buffer = virtrtlab_tty_chars_in_buffer,
+	.set_termios	 = virtrtlab_tty_set_termios,
+};
+
+/* -----------------------------------------------------------------------
  * Fault injection TX engine (issue #4) — NOT YET IMPLEMENTED
  *
  * Depends on the TX circular ringbuf and wire misc device from issue #2.
@@ -629,42 +859,42 @@ static const struct attribute_group *uart_groups[] = {
 
 static void virtrtlab_uart_tx_work_fn(struct work_struct *work)
 {
+	struct virtrtlab_uart_dev *udev =
+		container_of(work, struct virtrtlab_uart_dev, tx_work);
+	u8 burst[VIRTRTLAB_UART_BURST_SZ];
+	unsigned int burst_len, written;
+	u32 baud;
+
+	/* Execution context: process context (workqueue). */
+	burst_len = kfifo_out_spinlocked(&udev->tx_fifo, burst,
+					 sizeof(burst), &udev->tx_lock);
+	if (!burst_len)
+		return;
+
+	/* Count before any fault injection (issue #4 hook point). */
+	atomic64_add(burst_len, &udev->stat_tx_bytes);
+
 	/*
-	 * TODO issue #4-B: implement the fault injection TX engine.
-	 *
-	 * Execution context: process context via workqueue.
-	 * Called from: virtrtlab_uart_tx_timer_cb → schedule_work().
-	 *
-	 * Implementation sequence (see file header Step B for full detail):
-	 *
-	 *   1. Dequeue one burst from the TX circular ringbuf (spin_lock_irqsave
-	 *      tx_lock; read up to tx_buf_sz/8 bytes; release lock).
-	 *      If ringbuf is empty, return without rearming the timer.
-	 *
-	 *   2. atomic64_add(burst_len, &udev->stat_tx_bytes)  ← BEFORE faults.
-	 *
-	 *   3. Drop decision:
-	 *        u32 rnd = virtrtlab_bus_next_prng_u32();
-	 *        if (drop_rate_ppm && (rnd % 1000000U) < drop_rate_ppm) {
-	 *            atomic64_add(burst_len, &udev->stat_drops);
-	 *            goto rearm;  // do NOT deliver to wire device
-	 *        }
-	 *
-	 *   4. Bitflip decision:
-	 *        rnd = virtrtlab_bus_next_prng_u32();
-	 *        if (bitflip_rate_ppm && (rnd % 1000000U) < bitflip_rate_ppm) {
-	 *            u8 byte_idx = (rnd >> 8) % burst_len;
-	 *            u8 bit_idx  = rnd & 0x7;
-	 *            burst[byte_idx] ^= (1U << bit_idx);
-	 *        }
-	 *
-	 *   5. Write burst to wire misc device kfifo; wake POLLIN waitqueue.
-	 *      Non-blocking: if kfifo is full, increment stat_drops and discard.
-	 *
-	 * rearm:
-	 *   6. If TX ringbuf still has data, rearm hrtimer via
-	 *      virtrtlab_uart_tx_timer_cb logic (see below).
+	 * Fault injection engine (drop / bitflip) will be added in issue #4.
+	 * For now forward all bytes to the wire-side RX kfifo unconditionally.
 	 */
+	written = kfifo_in_spinlocked(&udev->rx_fifo, burst,
+				      burst_len, &udev->rx_lock);
+	if (written < burst_len)
+		atomic64_add(burst_len - written, &udev->stat_drops);
+
+	if (written)
+		wake_up_interruptible(&udev->wire_read_wq);
+
+	/* Rearm timer if more bytes are waiting in the TX fifo. */
+	if (!kfifo_is_empty(&udev->tx_fifo)) {
+		mutex_lock(&udev->lock);
+		baud = udev->baud;
+		mutex_unlock(&udev->lock);
+		hrtimer_start(&udev->tx_timer,
+			      ns_to_ktime(virtrtlab_uart_byte_ns(baud)),
+			      HRTIMER_MODE_REL);
+	}
 }
 
 static enum hrtimer_restart virtrtlab_uart_tx_timer_cb(struct hrtimer *timer)
@@ -673,25 +903,180 @@ static enum hrtimer_restart virtrtlab_uart_tx_timer_cb(struct hrtimer *timer)
 		container_of(timer, struct virtrtlab_uart_dev, tx_timer);
 
 	/*
-	 * TODO issue #4-B6 / issue #2-A6: compute next hrtimer expiry.
-	 *
-	 * The timer period must pace TX bursts at the current baud rate:
-	 *   burst_ns = (burst_len * 10 * NSEC_PER_SEC) / udev->baud
-	 *              (10 bits per byte: 1 start + 8 data + 1 stop)
-	 *
-	 * Add latency_ns and a jitter sample:
-	 *   u64 jitter = 0;
-	 *   if (udev->jitter_ns)
-	 *       jitter = virtrtlab_bus_next_prng_u32() % (udev->jitter_ns + 1);
-	 *   delay = burst_ns + udev->latency_ns + jitter;
-	 *
-	 * If TX ringbuf is empty after dequeue, return HRTIMER_NORESTART.
-	 * Otherwise: hrtimer_forward_now(timer, ns_to_ktime(delay));
-	 *            return HRTIMER_RESTART;
+	 * Kick the workqueue to drain one burst.  Latency / jitter shaping
+	 * (issue #4) will rearm the timer from tx_work_fn after accounting for
+	 * udev->latency_ns and udev->jitter_ns.  For now rearming is done
+	 * inside virtrtlab_uart_tx_work_fn itself.
 	 */
 	schedule_work(&udev->tx_work);
 	return HRTIMER_NORESTART;
 }
+
+/* -----------------------------------------------------------------------
+ * Wire character device — /dev/virtrtlab-wireN
+ *
+ * Provides the simulator side of the virtual UART pair.  Only one fd may
+ * be open at a time (enforced with wire_open_count).
+ *
+ * Data flow:
+ *   AUT: write(/dev/ttyVIRTLABx) → tx_fifo → rx_fifo → wire_read()
+ *   Simulator: wire_write() → tty_insert_flip_string → AUT read(/dev/ttyVIRTLABx)
+ * -----------------------------------------------------------------------
+ */
+
+static int virtrtlab_wire_open(struct inode *inode, struct file *filp)
+{
+	struct miscdevice *misc = filp->private_data;
+	struct virtrtlab_uart_dev *udev =
+		container_of(misc, struct virtrtlab_uart_dev, wire_dev);
+
+	if (atomic_cmpxchg(&udev->wire_open_count, 0, 1) != 0)
+		return -EBUSY;
+
+	/* Clear any stale reset flag from a previous session. */
+	atomic_set(&udev->wire_reset_pending, 0);
+	filp->private_data = udev;
+	return stream_open(inode, filp);
+}
+
+static int virtrtlab_wire_release(struct inode *inode, struct file *filp)
+{
+	struct virtrtlab_uart_dev *udev = filp->private_data;
+	unsigned long flags;
+
+	/* Drop unread bytes so the next open starts clean. */
+	spin_lock_irqsave(&udev->rx_lock, flags);
+	kfifo_reset(&udev->rx_fifo);
+	spin_unlock_irqrestore(&udev->rx_lock, flags);
+
+	atomic_set(&udev->wire_open_count, 0);
+	return 0;
+}
+
+static ssize_t virtrtlab_wire_read(struct file *filp, char __user *buf,
+				   size_t count, loff_t *ppos)
+{
+	struct virtrtlab_uart_dev *udev = filp->private_data;
+	size_t rd_sz;
+	u8 *kbuf;
+	unsigned int n;
+	unsigned long flags;
+	int ret;
+
+	/* Return EOF when a bus reset is pending; simulator must re-open. */
+	if (atomic_read(&udev->wire_reset_pending))
+		return 0;
+
+	if (!(filp->f_flags & O_NONBLOCK)) {
+		/*
+		 * !kfifo_is_empty() evaluated without lock is a hint only;
+		 * the authoritative check happens under rx_lock below.
+		 */
+		ret = wait_event_interruptible(udev->wire_read_wq,
+					       !kfifo_is_empty(&udev->rx_fifo) ||
+					       !atomic_read(&udev->port_active) ||
+					       atomic_read(&udev->wire_reset_pending));
+		if (ret)
+			return ret;
+		if (atomic_read(&udev->wire_reset_pending))
+			return 0;
+	}
+
+	/*
+	 * Cap to PAGE_SIZE so the allocation stays in the small-object
+	 * slab and the call cannot block arbitrarily long under rx_lock
+	 * (m1 fix: removes the old hard 256-byte ceiling).
+	 */
+	rd_sz = min_t(size_t, count, PAGE_SIZE);
+	kbuf = kmalloc(rd_sz, GFP_KERNEL);
+	if (!kbuf)
+		return -ENOMEM;
+
+	/*
+	 * Acquire rx_lock before touching rx_fifo.  port_shutdown() clears
+	 * port_active and calls kfifo_free() under the same lock, so this
+	 * check is race-free: if port_active is 0 here, rx_fifo is already
+	 * freed and must not be dereferenced (B1 fix).
+	 */
+	spin_lock_irqsave(&udev->rx_lock, flags);
+	if (!atomic_read(&udev->port_active)) {
+		spin_unlock_irqrestore(&udev->rx_lock, flags);
+		kfree(kbuf);
+		return 0;	/* port closed — EOF */
+	}
+	n = kfifo_out(&udev->rx_fifo, kbuf, rd_sz);
+	spin_unlock_irqrestore(&udev->rx_lock, flags);
+
+	if (!n) {
+		kfree(kbuf);
+		return -EAGAIN;	/* empty (non-blocking or spurious wakeup) */
+	}
+
+	ret = copy_to_user(buf, kbuf, n) ? -EFAULT : (ssize_t)n;
+	kfree(kbuf);
+	return ret;
+}
+
+static ssize_t virtrtlab_wire_write(struct file *filp, const char __user *buf,
+				    size_t count, loff_t *ppos)
+{
+	struct virtrtlab_uart_dev *udev = filp->private_data;
+	u8 kbuf[256];
+	size_t chunk, done = 0;
+	int n;
+
+	while (done < count) {
+		chunk = min(count - done, sizeof(kbuf));
+		if (copy_from_user(kbuf, buf + done, chunk))
+			return done ? (ssize_t)done : -EFAULT;
+
+		n = tty_insert_flip_string(&udev->port, kbuf, chunk);
+		if (n > 0) {
+			atomic64_add(n, &udev->stat_rx_bytes);
+			if ((size_t)n < chunk) {
+				atomic64_add(chunk - n, &udev->stat_overruns);
+				done += n;
+				break; /* flip buffer full */
+			}
+			done += n;
+		} else {
+			/* Flip buffer full on first byte. */
+			atomic64_add(chunk, &udev->stat_overruns);
+			break;
+		}
+	}
+
+	if (done)
+		tty_flip_buffer_push(&udev->port);
+
+	return done ? (ssize_t)done : -EAGAIN;
+}
+
+static __poll_t virtrtlab_wire_poll(struct file *filp, poll_table *wait)
+{
+	struct virtrtlab_uart_dev *udev = filp->private_data;
+	__poll_t mask = EPOLLOUT | EPOLLWRNORM; /* write always ready */
+
+	poll_wait(filp, &udev->wire_read_wq, wait);
+
+	if (!kfifo_is_empty(&udev->rx_fifo))
+		mask |= EPOLLIN | EPOLLRDNORM;
+	if (atomic_read(&udev->wire_reset_pending) ||
+	    !atomic_read(&udev->port_active))
+		mask |= EPOLLHUP;
+
+	return mask;
+}
+
+static const struct file_operations virtrtlab_wire_fops = {
+	.owner   = THIS_MODULE,
+	.open    = virtrtlab_wire_open,
+	.release = virtrtlab_wire_release,
+	.read    = virtrtlab_wire_read,
+	.write   = virtrtlab_wire_write,
+	.poll    = virtrtlab_wire_poll,
+	.llseek  = noop_llseek,
+};
 
 /* -----------------------------------------------------------------------
  * Bus event notifier
@@ -703,6 +1088,8 @@ static int virtrtlab_uart_bus_notifier(struct notifier_block *nb,
 {
 	struct virtrtlab_uart_dev *udev =
 		container_of(nb, struct virtrtlab_uart_dev, nb);
+	unsigned long flags;
+	unsigned int pending;
 
 	switch (event) {
 	case VIRTRTLAB_BUS_EVENT_RESET:
@@ -710,9 +1097,17 @@ static int virtrtlab_uart_bus_notifier(struct notifier_block *nb,
 		 * Spec reset semantics: (1) cancel pending TX, (2) clear all
 		 * fault attrs to 0, (3) re-enable device, (4) reset stats.
 		 * Termios mirrors and buffer sizes are unaffected by reset.
+		 *
+		 * Signal the wire side with wire_reset_pending so that
+		 * wire_read() returns EOF and the simulator can detect the
+		 * event.  Hangup the AUT TTY so the application gets SIGHUP.
 		 */
 		hrtimer_cancel(&udev->tx_timer);
 		cancel_work_sync(&udev->tx_work);
+		/* Flush pending TX bytes; stats are cleared below anyway. */
+		spin_lock_irqsave(&udev->tx_lock, flags);
+		kfifo_reset(&udev->tx_fifo);
+		spin_unlock_irqrestore(&udev->tx_lock, flags);
 		mutex_lock(&udev->lock);
 		udev->latency_ns     = 0;
 		udev->jitter_ns      = 0;
@@ -724,15 +1119,31 @@ static int virtrtlab_uart_bus_notifier(struct notifier_block *nb,
 		atomic64_set(&udev->stat_rx_bytes, 0);
 		atomic64_set(&udev->stat_overruns, 0);
 		atomic64_set(&udev->stat_drops, 0);
+		atomic_set(&udev->wire_reset_pending, 1);
+		wake_up_interruptible(&udev->wire_read_wq);
+		tty_port_tty_hangup(&udev->port, false);
 		break;
 	case VIRTRTLAB_BUS_EVENT_DOWN:
 		/*
-		 * Cancel pending TX.  In-flight bytes are drained if a wire
-		 * daemon has the fd open; otherwise dropped (stat_drops
-		 * incremented in tx_work — issue #2).
+		 * Cancel pending TX and discard queued bytes — they can no
+		 * longer be delivered.  Account for the loss in stat_drops.
+		 * Wake wire_read() so poll() callers see the state change.
 		 */
 		hrtimer_cancel(&udev->tx_timer);
 		cancel_work_sync(&udev->tx_work);
+		spin_lock_irqsave(&udev->tx_lock, flags);
+		pending = kfifo_len(&udev->tx_fifo);
+		kfifo_reset(&udev->tx_fifo);
+		spin_unlock_irqrestore(&udev->tx_lock, flags);
+		if (pending)
+			atomic64_add(pending, &udev->stat_drops);
+		wake_up_interruptible(&udev->wire_read_wq);
+		break;
+	case VIRTRTLAB_BUS_EVENT_UP:
+		/*
+		 * Bus returned to UP state.  tx_fifo was flushed on DOWN or
+		 * RESET; the next tty_write() will rearm the TX timer.
+		 */
 		break;
 	default:
 		break;
@@ -749,6 +1160,7 @@ static void virtrtlab_uart_dev_release(struct device *dev)
 {
 	struct virtrtlab_uart_dev *udev = to_uart_dev(dev);
 
+	tty_port_destroy(&udev->port);
 	mutex_destroy(&udev->lock);
 	kfree(udev);
 }
@@ -770,6 +1182,20 @@ static int __init virtrtlab_uart_init(void)
 		return -EINVAL;
 	}
 
+	/* Allocate and configure the TTY driver — /dev/ttyVIRTLABx (issue #2) */
+	virtrtlab_tty_driver = tty_alloc_driver(num_uart_devices,
+						TTY_DRIVER_REAL_RAW);
+	if (IS_ERR(virtrtlab_tty_driver))
+		return PTR_ERR(virtrtlab_tty_driver);
+
+	virtrtlab_tty_driver->driver_name  = "virtrtlab_uart";
+	virtrtlab_tty_driver->name         = "ttyVIRTLAB";
+	virtrtlab_tty_driver->major        = 0;  /* dynamic major */
+	virtrtlab_tty_driver->type         = TTY_DRIVER_TYPE_SERIAL;
+	virtrtlab_tty_driver->subtype      = SERIAL_TYPE_NORMAL;
+	virtrtlab_tty_driver->init_termios = tty_std_termios;
+	tty_set_operations(virtrtlab_tty_driver, &virtrtlab_tty_ops);
+
 	for (i = 0; i < num_uart_devices; i++) {
 		struct virtrtlab_uart_dev *udev;
 
@@ -780,6 +1206,13 @@ static int __init virtrtlab_uart_init(void)
 		}
 
 		mutex_init(&udev->lock);
+		tty_port_init(&udev->port);
+		spin_lock_init(&udev->tx_lock);
+		spin_lock_init(&udev->rx_lock);
+		init_waitqueue_head(&udev->wire_read_wq);
+		atomic_set(&udev->wire_open_count, 0);
+		atomic_set(&udev->wire_reset_pending, 0);
+		atomic_set(&udev->port_active, 0);
 		udev->index = i;
 
 		/* common defaults */
@@ -794,9 +1227,12 @@ static int __init virtrtlab_uart_init(void)
 		udev->stopbits = 1;
 
 		/* fault injection engine placeholders */
-		hrtimer_init(&udev->tx_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-		udev->tx_timer.function = virtrtlab_uart_tx_timer_cb;
+		hrtimer_setup(&udev->tx_timer, virtrtlab_uart_tx_timer_cb,
+			      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 		INIT_WORK(&udev->tx_work, virtrtlab_uart_tx_work_fn);
+
+		udev->port.ops = &virtrtlab_port_ops;
+		tty_port_link_device(&udev->port, virtrtlab_tty_driver, i);
 
 		device_initialize(&udev->dev);
 		udev->dev.bus         = &virtrtlab_bus_type;
@@ -824,19 +1260,43 @@ static int __init virtrtlab_uart_init(void)
 		}
 
 		uart_devs[i] = udev;
+
+		snprintf(udev->wire_name, sizeof(udev->wire_name),
+			 "virtrtlab-wire%u", i);
+		udev->wire_dev.minor = MISC_DYNAMIC_MINOR;
+		udev->wire_dev.name  = udev->wire_name;
+		udev->wire_dev.fops  = &virtrtlab_wire_fops;
+		ret = misc_register(&udev->wire_dev);
+		if (ret) {
+			pr_err("failed to register wire%u: %d\n", i, ret);
+			virtrtlab_bus_unregister_notifier(&udev->nb);
+			hrtimer_cancel(&udev->tx_timer);
+			device_unregister(&udev->dev);
+			uart_devs[i] = NULL;
+			goto err_unwind;
+		}
+
 		pr_info("uart%u registered\n", i);
+	}
+
+	ret = tty_register_driver(virtrtlab_tty_driver);
+	if (ret) {
+		pr_err("failed to register TTY driver: %d\n", ret);
+		goto err_unwind;
 	}
 
 	return 0;
 
 err_unwind:
 	while (i--) {
+		misc_deregister(&uart_devs[i]->wire_dev);
 		virtrtlab_bus_unregister_notifier(&uart_devs[i]->nb);
 		hrtimer_cancel(&uart_devs[i]->tx_timer);
 		cancel_work_sync(&uart_devs[i]->tx_work);
 		device_unregister(&uart_devs[i]->dev);
 		uart_devs[i] = NULL;
 	}
+	tty_driver_kref_put(virtrtlab_tty_driver);
 	return ret;
 }
 
@@ -844,7 +1304,10 @@ static void __exit virtrtlab_uart_exit(void)
 {
 	unsigned int i = num_uart_devices;
 
+	tty_unregister_driver(virtrtlab_tty_driver);
+
 	while (i--) {
+		misc_deregister(&uart_devs[i]->wire_dev);
 		virtrtlab_bus_unregister_notifier(&uart_devs[i]->nb);
 		hrtimer_cancel(&uart_devs[i]->tx_timer);
 		cancel_work_sync(&uart_devs[i]->tx_work);
@@ -852,6 +1315,8 @@ static void __exit virtrtlab_uart_exit(void)
 		uart_devs[i] = NULL;
 		pr_info("uart%u unregistered\n", i);
 	}
+
+	tty_driver_kref_put(virtrtlab_tty_driver);
 }
 
 module_init(virtrtlab_uart_init);
