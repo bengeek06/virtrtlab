@@ -56,6 +56,7 @@ One core module + multiple peripheral modules:
 ### Module parameters
 
 - `virtrtlab_uart`: `num_uarts` (int, default `1`, range `1..8`) — number of UART instances to register at load time. Instance indices are **0-based**: with `num_uarts=2`, instances are N=0 and N=1, producing `uart0`, `uart1`, `/dev/ttyVIRTLAB0`, `/dev/ttyVIRTLAB1`, `/dev/virtrtlab-wire0`, `/dev/virtrtlab-wire1`.
+- `virtrtlab_gpio`: `num_gpio_banks` (int, default `1`, range `1..32`) — number of GPIO bank instances to register at load time. Each `gpioN` instance models **one logical bank of 8 lines**. With `num_gpio_banks=2`, instances are `gpio0` and `gpio1`.
 
 ---
 
@@ -91,6 +92,7 @@ Fault injection and device configuration are done exclusively via **sysfs**:
 
 - Arm a fault: `echo 500000 > /sys/kernel/virtrtlab/devices/uart0/latency_ns`
 - Observe termios state: `cat /sys/kernel/virtrtlab/devices/uart0/baud`
+- Inject GPIO input bits: `echo 0x01 > /sys/kernel/virtrtlab/devices/gpio0/value`
 
 `virtrtlabctl` is a thin sysfs convenience wrapper and a `virtrtlabd` lifecycle manager.
 
@@ -166,10 +168,10 @@ Common files (all device types):
 - `type` (ro): `uart|gpio|spi|adc|dac|…`
 - `bus` (ro): `vrtlbus0`
 - `enabled` (rw): `0|1`
-- `latency_ns` (rw): base TX latency added to every transfer (nanoseconds)
+- `latency_ns` (rw): base delivery latency added to every transfer unit (nanoseconds)
 - `jitter_ns` (rw): uniform jitter amplitude (nanoseconds)
-- `drop_rate_ppm` (rw): drops per million bytes/frames
-- `bitflip_rate_ppm` (rw): bit flips per million bytes/frames
+- `drop_rate_ppm` (rw): drops per million transfer units
+- `bitflip_rate_ppm` (rw): payload corruptions or inverted transitions per million transfer units
 - `stats/` (ro): per-device counters (type-specific; see below)
 
 > `mode` (normal/record/replay) and `fault_policy` are **not** exposed in sysfs — record/replay and policy orchestration are handled in userspace scripts.
@@ -187,11 +189,13 @@ Type-specific examples:
   - `stats/reset` (wo): write `0` to reset all counters atomically
 
 - GPIO (`…/gpio0/`)
-  - `direction` (rw): `in|out`
-  - `value` (rw/ro): `0|1`
-  - `active_low` (rw): `0|1`
-  - `edge` (rw): `none|rising|falling|both`
-  - `stats/value_changes`, `stats/edge_events` (ro)
+  - `direction` (rw): 8-bit mask in canonical `0xnn` form; write format is strict `0xNN`, bit=`1` means AUT output, bit=`0` means AUT input
+  - `value` (rw/ro): 8-bit logical bank value in canonical `0xnn` form; sysfs writes drive only AUT-input bits and are interpreted after `active_low`
+  - `active_low` (rw): 8-bit mask in canonical `0xnn` form
+  - `edge_rising` (rw): 8-bit mask in canonical `0xnn` form
+  - `edge_falling` (rw): 8-bit mask in canonical `0xnn` form
+  - `stats/value_changes`, `stats/edge_events`, `stats/drops` (ro)
+  - `stats/reset` (wo): write `0` to reset all GPIO counters atomically
 
 - SPI (`…/spi0/`)
   - `mode` (rw): `0|1|2|3`
@@ -256,8 +260,13 @@ Command structure:
   - `virtrtlabctl get uart0 baud`
   - `virtrtlabctl set uart0 latency_ns=500000`
   - `virtrtlabctl set uart0 drop_rate_ppm=20000`
+  - `virtrtlabctl get gpio0 value`
+  - `virtrtlabctl set gpio0 direction=0x00`
+  - `virtrtlabctl set gpio0 value=0x01`
   - `virtrtlabctl stats uart0` — display all stats counters for uart0
+  - `virtrtlabctl stats gpio0` — display all stats counters for gpio0
   - `virtrtlabctl reset uart0` — reset stats counters only (equivalent to writing `0` to `stats/reset`); for a full device reset including fault attrs and `enabled`, write `reset` to the bus `state` attr
+  - `virtrtlabctl reset gpio0` — reset GPIO stats counters only
 - Daemon lifecycle:
   - `virtrtlabctl daemon start`
   - `virtrtlabctl daemon stop`
