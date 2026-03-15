@@ -658,26 +658,24 @@ static void virtrtlab_gpio_apply(struct virtrtlab_gpio_dev *gdev)
 		/*
 		 * Spec: "one PRNG draw per bitflip decision".
 		 *
-		 * A single u32 draw is split into two independent sub-fields:
-		 *   bits [19:0]  — ppm gate:
-		 *                    (rnd & ((1U << 20) - 1U)) < bitflip_ppm
-		 *   bits [31:20] — bit index:
-		 *                    (rnd >> 20) % hweight8(input_mask)
-		 *
-		 * The gate uses a uniform value in [0, 2^20 - 1].  For
-		 * bitflip_ppm ≤ 1 000 000 the flip probability is
-		 * bitflip_ppm / 2^20, which closely approximates the
-		 * requested ppm and the quantization error is negligible.
-		 * The upper 12 bits give 4096 values; modulo 8 (max
-		 * popcount) is essentially unbiased.
+		 * A single u32 draw is split into two subfields (correlated,
+		 * not statistically independent):
+		 *   gate:      (rnd % 1000000U) < bitflip_ppm
+		 *              Approximately uniform in [0, 999 999].
+		 *              2^32 is not a multiple of 1 000 000, so there
+		 *              is a small modulo bias (~0.007%); negligible
+		 *              for fault simulation purposes.
+		 *   bit index: (rnd / 1000000U) % hweight8(input_mask)
+		 *              Quotient lies in [0, 4294]; residual bias is
+		 *              negligible for up to 8 active lines.
 		 */
 		u32 rnd    = virtrtlab_bus_next_prng_u32();
 		u8 m       = input_mask;
 		u32 bit;	/* u32 avoids silent wrap-around after 8 left-shifts */
 		u8 i;
 
-		if ((rnd & ((1U << 20) - 1U)) < bitflip_ppm) {
-			u8 bit_idx = (u8)((rnd >> 20) % hweight8(input_mask));
+		if ((rnd % 1000000U) < bitflip_ppm) {
+			u8 bit_idx = (u8)((rnd / 1000000U) % hweight8(input_mask));
 
 			for (i = 0, bit = 1; m; bit <<= 1) {
 				if (!(m & bit))
@@ -941,8 +939,8 @@ static int __init virtrtlab_gpio_init(void)
 		gdev->index   = n;
 		gdev->enabled = true;	/* all other fields zero-initialised by kzalloc */
 
-		hrtimer_init(&gdev->delay_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-		gdev->delay_timer.function = virtrtlab_gpio_timer_cb;
+		hrtimer_setup(&gdev->delay_timer, virtrtlab_gpio_timer_cb,
+			      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 		INIT_WORK(&gdev->apply_work, virtrtlab_gpio_apply_work_fn);
 
 		gdev->nb.notifier_call = virtrtlab_gpio_bus_notifier_call;

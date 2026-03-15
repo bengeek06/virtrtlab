@@ -145,3 +145,24 @@ def gpio_module(core_module, request):
 
     _rmmod("virtrtlab_gpio")
     assert not _module_loaded("virtrtlab_gpio"), "virtrtlab_gpio failed to unload"
+
+
+@pytest.fixture()
+def uart_module(core_module, request):
+    """
+    Load virtrtlab_uart (depends on core_module fixture).
+    Accepts an optional pytest parameter for module params
+    via indirect parametrization of this fixture.
+    """
+    if not os.path.exists(KO["uart"]):
+        pytest.skip(f"Module not built: {KO['uart']}")
+
+    params = getattr(request, "param", "")
+    _rmmod("virtrtlab_uart")
+    _insmod(KO["uart"], params)
+    assert _module_loaded("virtrtlab_uart"), "virtrtlab_uart failed to load"
+
+    yield
+
+    _rmmod("virtrtlab_uart")
+    assert not _module_loaded("virtrtlab_uart"), "virtrtlab_uart failed to unload"
