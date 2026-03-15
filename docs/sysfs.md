@@ -152,11 +152,12 @@ Two distinct control planes exist:
 
 On module load, `virtrtlab_gpio` calls `gpiochip_add_data()` once per `gpioN` instance.
 Each chip has 8 lines (fixed). The chip label in the gpiolib subsystem is
-`"virtrtlab-gpioN"` (e.g. `"virtrtlab-gpio0"` for the first instance).
+`"gpioN"` (e.g. `"gpio0"` for the first instance) — this is the device name assigned
+by the `virtrtlab_bus` and returned by `gpio_device_get_label()`.
 
 The gpiochip index `N` is assigned dynamically by gpiolib; the resulting `/dev/gpiochipN`
-path is derived from `gc.base` and exposed via the `chip_path` sysfs attr so harness
-scripts can locate the correct device without scanning all gpiochips.
+path is exposed via the `chip_path` sysfs attr so harness scripts can locate the correct
+device without scanning all gpiochips.
 
 `virtrtlab_gpio` declares `softdep: pre: virtrtlab_core` only. No dependency on
 `gpio-sim` or any out-of-tree module.
@@ -237,9 +238,9 @@ before the new state reaches the AUT:
    `drop_rate_ppm`, `bitflip_rate_ppm`, and requested line value at the moment the `inject`
    attr write is processed. Later sysfs writes to fault attrs do not retroactively modify a
    transition already in the shim pipeline.
-2. **`enabled` check** — if `enabled=0` the shim is bypassed: the written value is
-   committed immediately to the AUT-facing line state, no fault evaluation occurs, no
-   counter is updated.
+2. **`enabled` check** — if `enabled=0` the injection is silently discarded: the
+   `inject` write returns success (`count`) but no value is committed, no fault gate
+   is evaluated, and no counter is updated. The line state is unchanged.
 3. **Drop gate** — one PRNG draw is taken. If `drop_rate_ppm` fires, the transition is
    suppressed: the line value is rolled back to its previous state, `stats/drops` is
    incremented, and the sequence terminates — no AUT notification is generated.
@@ -248,12 +249,10 @@ before the new state reaches the AUT:
 5. **Latency scheduling** — the shim schedules delivery after
    `latency_ns + uniform_random(0, jitter_ns)` nanoseconds via a per-line hrtimer.
 6. **Commit** — on timer expiry, the (possibly bitflipped) value is committed to the
-   AUT-facing line state. If the AUT has subscribed to edge events for this line and a
-   matching transition occurred:
-   - an edge event is enqueued in the AUT's line fd
-   - `stats/edge_events` is incremented by 1
-   - `stats/value_changes` is incremented by 1 for each line whose logical state changed
-     (from the AUT's perspective, after its own active-low flag is applied)
+   AUT-facing line state. `stats/value_changes` is incremented if and only if the new
+   state differs from the previous state. For lines currently owned by the AUT as output,
+   the commit is silently skipped (AUT remains authoritative) but `stats/bitflips` is
+   still updated if the bitflip gate fired.
 7. **No-transition case** — if the committed value equals the previous state (e.g. a
    bitflip caused a round-trip back to the original value), `stats/value_changes` does
    **not** increment for that line.
@@ -277,10 +276,9 @@ if a future API allows multi-line atomic writes, each line is evaluated independ
 
 | Attribute | Type | Description |
 |---|---|---|
-| `value_changes` | u64 | Count of line transitions actually applied to the AUT-facing line state after fault handling and latency timer expiry. One increment per affected line per committed write. |
-| `edge_events` | u64 | Count of edge events enqueued in AUT line fds as a result of applied transitions, summed over all subscribed lines. Only rising/falling events matching the AUT's ioctl-registered edge interest are counted. |
-| `drops` | u64 | Count of harness-injected line transitions suppressed by `drop_rate_ppm`. One increment per suppressed write (per transfer unit). |
-| `bitflips` | u64 | Count of harness-injected line transitions whose value was inverted by `bitflip_rate_ppm` before delivery. New in v0.2.0. |
+| `value_changes` | u64 | Count of line transitions actually committed to the AUT-facing line state (input lines only). Increments only when the new state differs from the previous state. |
+| `drops` | u64 | Count of harness-injected transitions suppressed by `drop_rate_ppm`. One increment per suppressed write (per transfer unit). |
+| `bitflips` | u64 | Count of bitflip gate fires: increments whenever `bitflip_rate_ppm` inverts the injected value, regardless of line direction. New in v0.2.0. |
 | `reset` | wo | Writing `0` resets all GPIO stats counters atomically. Any other value returns `-EINVAL`. `read()` returns `-EPERM`. |
 
 Counters wrap silently at `UINT64_MAX` (modular arithmetic, no saturation). Bus
@@ -301,8 +299,8 @@ UART); it does **not** affect line state or the AUT's open line descriptors.
 | `inject` write with `N` out of range (`N` > 7) | return `-EINVAL` |
 | `inject` write with `V` not in `{0, 1}` | return `-EINVAL` |
 | `inject` write with malformed format (missing `:`, non-decimal, empty) | return `-EINVAL` |
-| `read()` on `inject` | return `-EPERM` |
-| `inject` write while `enabled=0` | return `-EIO`; shim is active and gate fires |
+| `read()` on `inject` | permission error (write-only attr, mode `0200`) |
+| `inject` write while `enabled=0` | return `count` (success); injection silently discarded, line state unchanged |
 | `inject` write while bus `state=down` | return `-EIO` |
 | `inject` write on line currently owned by AUT as output | write returns `0` (success); the injection is accepted, goes through drop/bitflip/latency stages, but commits to the stored line value only — the AUT's `GPIO_V2_LINE_SET_VALUES_IOCTL` remains authoritative for the output state |
 | `read()` on `stats/reset` | return `-EPERM` |

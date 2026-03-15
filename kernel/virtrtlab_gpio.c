@@ -273,14 +273,15 @@ static void virtrtlab_gpio_line_apply(struct virtrtlab_gpio_dev *gdev,
 	 * Commit only for input lines.  Inject on an AUT-owned output line is
 	 * accepted by the shim (PRNG draws consumed, drop/latency honoured) but
 	 * the stored line value is not overwritten — the AUT is authoritative.
-	 * Stats are not updated either: no observable state change occurred.
+	 * stat_bitflips is still updated when the bitflip gate fires regardless
+	 * of line direction: it counts gate fires, not observable state changes.
 	 */
+	if (new_val != snap_val)
+		gdev->stat_bitflips++;
 	if (!line->is_output) {
 		line->value = new_val;
 		if (new_val != old_val)
 			gdev->stat_value_changes++;
-		if (new_val != snap_val)
-			gdev->stat_bitflips++;
 	}
 	mutex_unlock(&gdev->lock);
 }
@@ -318,7 +319,9 @@ static void virtrtlab_gpio_apply_work_fn(struct work_struct *work)
  * N is the line index [0, VIRTRTLAB_GPIO_LINES); V is '0' or '1'.
  * A trailing newline is tolerated.
  *
- * Returns 0 on success; -EINVAL on format error; -ERANGE if N >= VIRTRTLAB_GPIO_LINES.
+ * Returns 0 on success; -EINVAL on any format or range error.
+ * All validation errors are normalised to -EINVAL so that userspace receives a
+ * consistent errno on any malformed write, matching sysfs convention.
  */
 static int virtrtlab_gpio_parse_inject(const char *buf, size_t count,
 				       unsigned int *line_idx, u8 *val)
@@ -355,7 +358,7 @@ static int virtrtlab_gpio_parse_inject(const char *buf, size_t count,
 		return -EINVAL;
 
 	if (idx >= VIRTRTLAB_GPIO_LINES)
-		return -ERANGE;
+		return -EINVAL;
 
 	*line_idx = (unsigned int)idx;
 	*val = sep[1] - '0';
@@ -374,7 +377,7 @@ static ssize_t inject_store(struct device *dev, struct device_attribute *attr,
 
 	ret = virtrtlab_gpio_parse_inject(buf, count, &line_idx, &val);
 	if (ret)
-		return -EINVAL;
+		return ret;
 
 	/*
 	 * Inject semantics (spec §inject attr):

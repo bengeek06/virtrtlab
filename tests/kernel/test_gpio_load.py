@@ -214,10 +214,10 @@ class TestGpioUnload:
 # Tests — multi-bank load
 # ---------------------------------------------------------------------------
 
-class TestGpioMultiBank:
+class TestGpioMultiDev:
     """virtrtlab_gpio with num_gpio_devs=2."""
 
-    def _load_two_banks(self):
+    def _load_two_devs(self):
         _rmmod("virtrtlab_gpio")
         _rmmod("virtrtlab_core")
         _insmod(KO["core"])
@@ -227,12 +227,12 @@ class TestGpioMultiBank:
         _rmmod("virtrtlab_gpio")
         _rmmod("virtrtlab_core")
 
-    def test_two_banks_load(self):
+    def test_two_devs_load(self):
         """Both gpio0 and gpio1 dirs must exist with num_gpio_devs=2."""
         for ko in ("core", "gpio"):
             if not os.path.exists(KO[ko]):
                 pytest.skip(f"Module not built: {KO[ko]}")
-        self._load_two_banks()
+        self._load_two_devs()
         try:
             assert os.path.isdir(_gpio_path(0)), "gpio0 dir missing"
             assert os.path.isdir(_gpio_path(1)), "gpio1 dir missing"
@@ -241,37 +241,37 @@ class TestGpioMultiBank:
         finally:
             self._unload_all()
 
-    def test_two_banks_dmesg(self):
-        """dmesg must contain registration messages for both banks."""
+    def test_two_devs_dmesg(self):
+        """dmesg must contain registration messages for both devices."""
         for ko in ("core", "gpio"):
             if not os.path.exists(KO[ko]):
                 pytest.skip(f"Module not built: {KO[ko]}")
-        self._load_two_banks()
+        self._load_two_devs()
         try:
             lines = dmesg_lines()
-            for bank in (0, 1):
+            for dev in (0, 1):
                 matching = [l for l in lines
                             if "virtrtlab_gpio" in l
-                            and f"gpio{bank}" in l
+                            and f"gpio{dev}" in l
                             and "registered" in l]
-                assert matching, f"Missing dmesg registration for gpio{bank}"
+                assert matching, f"Missing dmesg registration for gpio{dev}"
         finally:
             self._unload_all()
 
-    def test_two_banks_unload_dmesg(self):
-        """dmesg must contain unregistration messages for both banks after rmmod."""
+    def test_two_devs_unload_dmesg(self):
+        """dmesg must contain unregistration messages for both devices after rmmod."""
         for ko in ("core", "gpio"):
             if not os.path.exists(KO[ko]):
                 pytest.skip(f"Module not built: {KO[ko]}")
-        self._load_two_banks()
+        self._load_two_devs()
         self._unload_all()
         lines = dmesg_lines()
-        for bank in (0, 1):
+        for dev in (0, 1):
             matching = [l for l in lines
                         if "virtrtlab_gpio" in l
-                        and f"gpio{bank}" in l
+                        and f"gpio{dev}" in l
                         and "unregistered" in l]
-            assert matching, f"Missing dmesg unregistration for gpio{bank}"
+            assert matching, f"Missing dmesg unregistration for gpio{dev}"
 
 
 # ---------------------------------------------------------------------------
