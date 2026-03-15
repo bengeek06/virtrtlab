@@ -12,6 +12,9 @@ modules.builtin
 modules.builtin.modinfo
 Module.symvers
 
+# Daemon
+daemon/virtrtlabd
+
 # Userspace
 __pycache__/
 *.pyc
