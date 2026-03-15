@@ -448,27 +448,174 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_list(args: argparse.Namespace) -> int:
-    raise NotImplementedError("cmd_list not yet implemented")
+    target = args.list_target  # "buses" or "devices"
+
+    if target == "buses":
+        buses_dir = Path(SYSFS_ROOT) / "buses"
+        if not buses_dir.exists():
+            raise VirtrtlabError("sysfs bus directory not found (is the module loaded?)", exit_code=4)
+        buses = sorted(p.name for p in buses_dir.iterdir() if p.is_dir())
+        if args.json:
+            _emit({"buses": buses}, True)
+        else:
+            for b in buses:
+                print(b)
+        return 0
+
+    # target == "devices"
+    devices_dir = Path(SYSFS_ROOT) / "devices"
+    if not devices_dir.exists():
+        raise VirtrtlabError("sysfs device directory not found (is the module loaded?)", exit_code=4)
+    type_filter: str | None = getattr(args, "type", None)
+    result = []
+    for dev_path in sorted(devices_dir.iterdir()):
+        if not dev_path.is_dir():
+            continue
+        type_file = dev_path / "type"
+        dev_type = type_file.read_text().strip() if type_file.exists() else "unknown"
+        if type_filter and dev_type != type_filter:
+            continue
+        bus_file = dev_path / "bus"
+        bus = bus_file.read_text().strip() if bus_file.exists() else "unknown"
+        enabled_file = dev_path / "enabled"
+        enabled = enabled_file.read_text().strip() == "1" if enabled_file.exists() else None
+        result.append({"name": dev_path.name, "type": dev_type, "bus": bus, "enabled": enabled})
+
+    if args.json:
+        _emit({"devices": result}, True)
+    else:
+        for d in result:
+            enabled_str = ("yes" if d["enabled"] else "no") if d["enabled"] is not None else "?"
+            print(f"{d['name']:<20} type={d['type']:<8} bus={d['bus']:<12} enabled={enabled_str}")
+    return 0
+
+
+def _sysfs_path(target: str, attr: str) -> Path:
+    if target == "bus":
+        return Path(SYSFS_ROOT) / "buses" / "vrtlbus0" / attr
+    return Path(SYSFS_ROOT) / "devices" / target / attr
 
 
 def cmd_get(args: argparse.Namespace) -> int:
-    raise NotImplementedError("cmd_get not yet implemented")
+    path = _sysfs_path(args.target, args.attr)
+    if not path.exists():
+        raise VirtrtlabError(
+            f"attribute not found: {path}", exit_code=4
+        )
+    try:
+        value = path.read_text().strip()
+    except OSError as exc:
+        raise VirtrtlabError(str(exc), exit_code=4) from exc
+    if args.json:
+        _emit({"target": args.target, "attr": args.attr, "value": value}, True)
+    else:
+        print(value)
+    return 0
 
 
 def cmd_set(args: argparse.Namespace) -> int:
-    raise NotImplementedError("cmd_set not yet implemented")
+    for assignment in args.assignments:
+        if "=" not in assignment:
+            raise VirtrtlabError(
+                f"invalid assignment '{assignment}': expected attr=value", exit_code=2
+            )
+        attr, _, value = assignment.partition("=")
+        attr = attr.strip()
+        if not attr:
+            raise VirtrtlabError(
+                f"invalid assignment '{assignment}': attribute name is empty", exit_code=2
+            )
+        path = _sysfs_path(args.target, attr)
+        if not path.exists():
+            raise VirtrtlabError(f"attribute not found: {path}", exit_code=4)
+        try:
+            path.write_text(value)
+        except OSError as exc:
+            raise VirtrtlabError(
+                f"kernel rejected write to {attr}: {exc.strerror}", exit_code=4
+            ) from exc
+    return 0
 
 
 def cmd_stats(args: argparse.Namespace) -> int:
-    raise NotImplementedError("cmd_stats not yet implemented")
+    stats_dir = Path(SYSFS_ROOT) / "devices" / args.device / "stats"
+    if not stats_dir.exists():
+        raise VirtrtlabError(f"stats directory not found: {stats_dir}", exit_code=4)
+    stats: dict[str, str] = {}
+    for f in sorted(stats_dir.iterdir()):
+        if f.is_file():
+            try:
+                stats[f.name] = f.read_text().strip()
+            except OSError:
+                stats[f.name] = "<error>"
+
+    if args.json:
+        _emit({"device": args.device, "stats": stats}, True)
+    else:
+        print(f"{args.device} stats:")
+        for k, v in stats.items():
+            print(f"  {k:<20} {v}")
+    return 0
 
 
 def cmd_reset(args: argparse.Namespace) -> int:
-    raise NotImplementedError("cmd_reset not yet implemented")
+    reset_path = Path(SYSFS_ROOT) / "devices" / args.device / "stats" / "reset"
+    if not reset_path.exists():
+        raise VirtrtlabError(f"reset file not found: {reset_path}", exit_code=4)
+    try:
+        reset_path.write_text("0")
+    except OSError as exc:
+        raise VirtrtlabError(
+            f"kernel rejected stats reset for {args.device}: {exc.strerror}", exit_code=4
+        ) from exc
+    return 0
 
 
 def cmd_daemon(args: argparse.Namespace) -> int:
-    raise NotImplementedError("cmd_daemon not yet implemented")
+    subcmd: str = args.daemon_command
+    no_sudo: bool = args.no_sudo
+
+    if subcmd == "status":
+        pid = _daemon_pid()
+        if args.json:
+            _emit(
+                {"state": "running", "pid": pid} if pid else {"state": "stopped", "pid": None},
+                True,
+            )
+        else:
+            if pid:
+                print(f"state  running\npid    {pid}")
+            else:
+                print("state  stopped")
+        return 0 if pid else 3
+
+    if subcmd == "stop":
+        _stop_daemon(no_sudo)
+        return 0
+
+    # subcmd == "start"
+    if _daemon_pid() is not None:
+        raise VirtrtlabError("daemon is already running", exit_code=3)
+
+    num_uarts: int = args.num_uarts
+    run_dir: str = args.run_dir
+
+    _ensure_run_dir(no_sudo)
+    proc = subprocess.Popen(
+        _sudo_prefix(no_sudo) + [DAEMON_BIN, "--num-uarts", str(num_uarts), "--run-dir", run_dir],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    _write_run_file("daemon.pid", str(proc.pid) + "\n", no_sudo)
+
+    # Poll uart sockets
+    expected_socks = [Path(run_dir) / f"uart{i}.sock" for i in range(num_uarts)]
+    _poll_sockets(expected_socks)
+
+    if args.json:
+        _emit({"state": "running", "pid": proc.pid}, True)
+    else:
+        print(f"daemon started (pid {proc.pid})")
+    return 0
 
 
 # ---------------------------------------------------------------------------
