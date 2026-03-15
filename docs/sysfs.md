@@ -22,7 +22,7 @@ Sub-directories: `buses/`, `devices/`.
 |---|---|---|---|
 | `state` | rw | string | `up\|down\|reset` |
 | `clock_ns` | ro | u64 | `CLOCK_MONOTONIC` snapshot (ns) taken at the moment the attr is read; nanosecond-precision via `ktime_get_ns()`, not driven by the TX hrtimer |
-| `seed` | rw | u32 | xorshift32 PRNG seed for stochastic fault profiles. **Read**: returns the current internal PRNG state (not necessarily the value last written — draws advance the state). **Write**: immediately replaces the internal state with the written value; `0` is invalid and returns `-EINVAL`. On `insmod`, the PRNG is initialised to `1` (hard-coded; always identical after a reload). `state=reset` does **not** affect the PRNG — to reset to a known sequence, write `seed` explicitly (e.g. `echo 1 > seed`). One PRNG draw is consumed per drop decision and one per bitflip decision. |
+| `seed` | rw | u32 | xorshift32 PRNG seed for stochastic fault profiles. **Read**: returns the current internal PRNG state (not necessarily the value last written — draws advance the state). **Write**: immediately replaces the internal state with the written value; `0` is invalid and returns `-EINVAL`. On `insmod`, the PRNG is initialised to `1` (hard-coded; always identical after a reload). `state=reset` does **not** affect the PRNG — to reset to a known sequence, write `seed` explicitly (e.g. `echo 1 > seed`). Drop decisions consume one PRNG draw per burst. Bitflip decisions consume one draw for the gate+byte-index check and, when the gate fires, a second draw for the bit position. |
 
 ### `state` semantics
 
@@ -104,14 +104,14 @@ Writes take effect on the **next** open of `/dev/ttyVIRTLABx` (not live-resizabl
 |---|---|---|
 | `tx_bytes` | u64 | Bytes received from the AUT, counted **before** fault injection. `tx_bytes − drops ≈ bytes actually delivered to the wire device`. |
 | `rx_bytes` | u64 | Bytes received from wire device toward AUT |
-| `overruns` | u64 | **RX buffer only**: bytes evicted from the RX buffer (wire device → AUT) on overflow; incremented by the count of bytes evicted per overflow event. TX buffer never evicts — it applies backpressure instead. |
+| `overruns` | u64 | Bytes lost due to buffer saturation, in either direction: (a) **AUT → wire**: bytes that could not be enqueued into the wire-side RX fifo when it was full (TX path overflow); (b) **wire → AUT**: bytes that could not be inserted into the TTY flip buffer when it was full (RX path overflow). Incremented by the count of bytes lost per event. A high `overruns` value indicates a slow consumer on either side. |
 | `drops` | u64 | Bytes that left the AUT TX buffer but were **not** delivered to the wire device, for any of the following reasons: (1) fault injection gate (`drop_rate_ppm`); (2) `state=down` with no daemon attached; (3) `enabled=false` gate — bytes already queued when `enabled` is written to `0`; (4) port close (`tty_close`) while TX bytes are still pending. Incremented by the byte count of the affected burst. Invariant: `tx_bytes − drops ≈ bytes actually delivered to the wire device`. |
 
 Counters are reset by writing `0` to `stats/reset`. Counters wrap silently at `UINT64_MAX` (modular arithmetic, no saturation).
 
 > **Counter units (UART)**: all four counters measure individual **bytes**. For future peripheral types (CAN, SPI, …), counter units are type-specific and documented in each peripheral's spec section; the common-attrs table does not define units.
 
-> **`drops` vs `overruns`**: `drops` counts bytes lost on the **AUT → wire** path (TX side). `overruns` counts bytes evicted from the **wire → AUT** RX buffer on overflow (RX side). A high `drops` value indicates fault injection activity or bus state events; a high `overruns` value indicates the simulator is not consuming the wire device fast enough.
+> **`drops` vs `overruns`**: `drops` counts bytes lost on the **AUT → wire** TX path due to fault injection or bus/device state events. `overruns` counts bytes lost due to **buffer saturation** — either the wire-side RX fifo (AUT → wire, slow daemon) or the TTY flip buffer (wire → AUT, slow AUT reader). High `drops` signals fault injection activity; high `overruns` signals a slow consumer.
 
 ### Error behaviour
 

@@ -41,6 +41,7 @@ from conftest import (
     _insmod,
     _module_loaded,
     _rmmod,
+    dmesg_lines,
 )
 
 DEVICES_ROOT = f"{SYSFS_ROOT}/devices"
@@ -212,6 +213,7 @@ class TestUartStatsLoopback:
 
     def test_drops_count_matches_drop_rate(self, uart_module):
         """drops counter must match TX bytes when drop_rate_ppm=1000000."""
+        w(u("stats/reset"), "0")
         w(u("drop_rate_ppm"), "1000000")
         tty_fd  = _open_raw_tty(TTY_DEV)
         wire_fd = os.open(WIRE_DEV, os.O_RDWR | os.O_NONBLOCK)
@@ -317,6 +319,7 @@ class TestUartFaultInjectionBehavior:
 
     def test_drop_rate_ppm_full_drops_all_bytes(self, uart_module):
         """drop_rate_ppm=1000000: 100% of TX bytes must appear in stats/drops (AC1)."""
+        w(u("stats/reset"), "0")
         w(u("drop_rate_ppm"), "1000000")
         tty_fd  = _open_raw_tty(TTY_DEV)
         wire_fd = os.open(WIRE_DEV, os.O_RDWR | os.O_NONBLOCK)
@@ -354,6 +357,7 @@ class TestUartFaultInjectionBehavior:
 
     def test_latency_ns_1ms_no_soft_lockup(self, uart_module):
         """latency_ns=1000000 at 115200 baud: dmesg must not show soft lockup (AC3)."""
+        baseline = set(dmesg_lines())
         w(u("latency_ns"), "1000000")
         tty_fd  = _open_raw_tty(TTY_DEV)
         wire_fd = os.open(WIRE_DEV, os.O_RDWR | os.O_NONBLOCK)
@@ -365,10 +369,11 @@ class TestUartFaultInjectionBehavior:
                 os.write(tty_fd, b"\xAA" * 64)
                 time.sleep(0.05)
             time.sleep(1.0)
-            result = subprocess.run(["dmesg"], capture_output=True, text=True,
-                                    check=False)
-            assert "soft lockup" not in result.stdout.lower(), (
-                "Detected soft lockup in dmesg with latency_ns=1000000 (AC3)"
+            new_lines = [l for l in dmesg_lines() if l not in baseline]
+            soft_lockups = [l for l in new_lines if "soft lockup" in l.lower()]
+            assert not soft_lockups, (
+                f"Detected soft lockup in dmesg with latency_ns=1000000 (AC3):\n"
+                + "\n".join(soft_lockups)
             )
         finally:
             os.close(wire_fd)

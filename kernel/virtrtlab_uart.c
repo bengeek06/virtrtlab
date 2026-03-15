@@ -936,12 +936,14 @@ rearm:
 	 * kfifo_is_empty() is checked without tx_lock — intentional lockless
 	 * hint; the worst case is a missed rearm, recovered on the next
 	 * tty_write() hrtimer_start() call.
-	 * Delay = baud pacing + latency_ns + uniform jitter in [0, jitter_ns].
+	 * Delay = baud pacing for burst_len bytes + latency_ns + uniform jitter
+	 * in [0, jitter_ns].  Scaling by burst_len keeps the average delivered
+	 * rate aligned with the configured baud rate regardless of burst size.
 	 * Two u32 PRNG draws combined into a u64 so the full range is reachable
 	 * when jitter_ns > UINT32_MAX (spec ceiling: 10 s = 10^10 ns).
 	 */
 	if (!kfifo_is_empty(&udev->tx_fifo)) {
-		delay_ns = virtrtlab_uart_byte_ns(baud) + latency_ns;
+		delay_ns = virtrtlab_uart_byte_ns(baud) * burst_len + latency_ns;
 		if (jitter_ns) {
 			u64 rnd64 = (u64)virtrtlab_bus_next_prng_u32() << 32 |
 				    (u64)virtrtlab_bus_next_prng_u32();
