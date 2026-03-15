@@ -7,26 +7,7 @@
  * Issue #2 (TTY driver (/dev/ttyVIRTLABx) + wire misc device
  * (/dev/virtrtlab-wireN) + kfifos + set_termios mirrors) is COMPLETE.
  * Issue #3 (per-device stats counters) is COMPLETE.
- *
- * The inline fault injection engine (issue #4) is NOT YET implemented.
- * Pending work:
- *
- *   Step B — issue #4: fault injection engine in virtrtlab_uart_tx_work_fn
- *     B1. Read one burst from TX ringbuf (up to tx_buf_sz/8 bytes).
- *     B2. atomic64_add(burst_len, &udev->stat_tx_bytes) — BEFORE any fault.
- *     B3. Drop decision: draw u32 rnd = virtrtlab_bus_next_prng_u32();
- *         if (udev->drop_rate_ppm && (rnd % 1000000U) < udev->drop_rate_ppm)
- *             atomic64_add(burst_len, &udev->stat_drops); return.
- *         NOTE: use % 1000000U (not & 0xFFFFF) to avoid the ~4.76% bias.
- *     B4. Bitflip decision: draw another u32;
- *         if (udev->bitflip_rate_ppm && (rnd % 1000000U) < udev->bitflip_rate_ppm)
- *             flip one random bit in a random byte of the burst.
- *     B5. Write (possibly corrupted) burst to the wire misc device kfifo;
- *         wake wire device poll waitqueue (POLLIN).
- *     B6. In virtrtlab_uart_tx_timer_cb: compute next expiry from baud rate
- *         and remaining bytes in TX ringbuf; add latency_ns + jitter_ns
- *         (jitter sampled from virtrtlab_bus_next_prng_u32() % (jitter_ns+1));
- *         rearm hrtimer or stop if ringbuf is empty.
+ * Issue #4 (inline fault injection engine: drop, bitflip, latency, jitter) is COMPLETE.
  *
  * Part of VirtRTLab — Linux real-time peripheral simulation framework
  */
@@ -857,13 +838,16 @@ static const struct tty_operations virtrtlab_tty_ops = {
 };
 
 /* -----------------------------------------------------------------------
- * Fault injection TX engine (issue #4) — NOT YET IMPLEMENTED
+ * Fault injection TX engine (issue #4)
  *
- * Depends on the TX circular ringbuf and wire misc device from issue #2.
- * See the implementation plan in the file header comment above.
- *
- * tx_timer and tx_work are structural placeholders; their bodies will be
- * filled in once issue #2 lands.
+ * Data path per burst:
+ *   B1. kfifo_out() — dequeue up to BURST_SZ bytes from TX fifo.
+ *   B2. stat_tx_bytes += burst_len (before any fault decision).
+ *   Enabled gate: if !enabled, stat_drops += burst_len, goto rearm.
+ *   B3. Drop: one PRNG draw; if gate fires, stat_drops += burst_len, goto rearm.
+ *   B4. Bitflip: draw1 for gate + byte index; draw2 (low 3 bits) for bit pos.
+ *   B5. kfifo_in() to wire-side rx_fifo; overflow increments stat_overruns.
+ *   B6. Rearm hrtimer with baud pacing + latency_ns + jitter sample.
  * -----------------------------------------------------------------------
  */
 
@@ -873,36 +857,100 @@ static void virtrtlab_uart_tx_work_fn(struct work_struct *work)
 		container_of(work, struct virtrtlab_uart_dev, tx_work);
 	u8 burst[VIRTRTLAB_UART_BURST_SZ];
 	unsigned int burst_len, written;
-	u32 baud;
+	bool enabled;
+	u32 baud, drop_ppm, flip_ppm;
+	u64 latency_ns, jitter_ns, delay_ns;
 
-	/* Execution context: process context (workqueue). */
+	/* B1: dequeue one burst from the TX fifo. */
 	burst_len = kfifo_out_spinlocked(&udev->tx_fifo, burst,
 					 sizeof(burst), &udev->tx_lock);
 	if (!burst_len)
 		return;
 
-	/* Count before any fault injection (issue #4 hook point). */
+	/* B2: count bytes before any fault decision. */
 	atomic64_add(burst_len, &udev->stat_tx_bytes);
 
 	/*
-	 * Fault injection engine (drop / bitflip) will be added in issue #4.
-	 * For now forward all bytes to the wire-side RX kfifo unconditionally.
+	 * Snapshot all fault attrs in one critical section so a concurrent
+	 * sysfs write cannot partially update them mid-burst.
 	 */
+	mutex_lock(&udev->lock);
+	enabled    = udev->enabled;
+	baud       = udev->baud;
+	drop_ppm   = udev->drop_rate_ppm;
+	flip_ppm   = udev->bitflip_rate_ppm;
+	latency_ns = udev->latency_ns;
+	jitter_ns  = udev->jitter_ns;
+	mutex_unlock(&udev->lock);
+
+	/*
+	 * Enabled gate: bytes already queued when enabled transitions to false
+	 * are drained as drops so the TX fifo does not accumulate stale data.
+	 * The next tty_write() will rearm the timer on re-enable.
+	 */
+	if (!enabled) {
+		atomic64_add(burst_len, &udev->stat_drops);
+		goto rearm;
+	}
+
+	/*
+	 * B3: drop decision — one PRNG draw per burst.
+	 * virtrtlab_bus_next_prng_u32() acquires a spinlock internally;
+	 * calling it from process context (workqueue) is safe.
+	 */
+	if (drop_ppm && (virtrtlab_bus_next_prng_u32() % 1000000U) < drop_ppm) {
+		atomic64_add(burst_len, &udev->stat_drops);
+		goto rearm;
+	}
+
+	/*
+	 * B4: bitflip decision — first draw for gate + byte index:
+	 *   gate:     rnd % 1000000U < flip_ppm
+	 *   byte idx: rnd / 1000000U % burst_len  (quotient in [0, 4294])
+	 * A second draw supplies the bit position (low 3 bits) so the gate,
+	 * index, and bit fields are statistically independent.
+	 */
+	if (flip_ppm) {
+		u32 rnd = virtrtlab_bus_next_prng_u32();
+
+		if ((rnd % 1000000U) < flip_ppm) {
+			u32 rnd2 = virtrtlab_bus_next_prng_u32();
+
+			burst[(rnd / 1000000U) % burst_len] ^=
+				(u8)(1U << (rnd2 & 7U));
+		}
+	}
+
+	/* B5: deliver (possibly corrupted) burst to the wire-side kfifo. */
 	written = kfifo_in_spinlocked(&udev->rx_fifo, burst,
 				      burst_len, &udev->rx_lock);
 	if (written < burst_len)
-		atomic64_add(burst_len - written, &udev->stat_drops);
+		atomic64_add(burst_len - written, &udev->stat_overruns);
 
 	if (written)
 		wake_up_interruptible(&udev->wire_read_wq);
 
-	/* Rearm timer if more bytes are waiting in the TX fifo. */
+rearm:
+	/*
+	 * B6: rearm hrtimer if more bytes remain in the TX fifo.
+	 * kfifo_is_empty() is checked without tx_lock — intentional lockless
+	 * hint; the worst case is a missed rearm, recovered on the next
+	 * tty_write() hrtimer_start() call.
+	 * Delay = baud pacing for burst_len bytes + latency_ns + uniform jitter
+	 * in [0, jitter_ns].  Scaling by burst_len keeps the average delivered
+	 * rate aligned with the configured baud rate regardless of burst size.
+	 * Two u32 PRNG draws combined into a u64 so the full range is reachable
+	 * when jitter_ns > UINT32_MAX (spec ceiling: 10 s = 10^10 ns).
+	 */
 	if (!kfifo_is_empty(&udev->tx_fifo)) {
-		mutex_lock(&udev->lock);
-		baud = udev->baud;
-		mutex_unlock(&udev->lock);
-		hrtimer_start(&udev->tx_timer,
-			      ns_to_ktime(virtrtlab_uart_byte_ns(baud)),
+		delay_ns = virtrtlab_uart_byte_ns(baud) * burst_len + latency_ns;
+		if (jitter_ns) {
+			u64 rnd64 = (u64)virtrtlab_bus_next_prng_u32() << 32 |
+				    (u64)virtrtlab_bus_next_prng_u32();
+
+			delay_ns += rnd64 % (jitter_ns + 1);
+		}
+		hrtimer_start(&udev->tx_timer, ns_to_ktime(delay_ns),
 			      HRTIMER_MODE_REL);
 	}
 }
@@ -912,12 +960,6 @@ static enum hrtimer_restart virtrtlab_uart_tx_timer_cb(struct hrtimer *timer)
 	struct virtrtlab_uart_dev *udev =
 		container_of(timer, struct virtrtlab_uart_dev, tx_timer);
 
-	/*
-	 * Kick the workqueue to drain one burst.  Latency / jitter shaping
-	 * (issue #4) will rearm the timer from tx_work_fn after accounting for
-	 * udev->latency_ns and udev->jitter_ns.  For now rearming is done
-	 * inside virtrtlab_uart_tx_work_fn itself.
-	 */
 	schedule_work(&udev->tx_work);
 	return HRTIMER_NORESTART;
 }
@@ -1095,6 +1137,12 @@ static __poll_t virtrtlab_wire_poll(struct file *filp, poll_table *wait)
 
 	poll_wait(filp, &udev->wire_read_wq, wait);
 
+	/*
+	 * Lockless hint: kfifo_is_empty() is read without rx_lock.  This is
+	 * a best-effort snapshot; poll() re-evaluates after the next wakeup.
+	 * The race with kfifo_free() in port_shutdown() reads only the size
+	 * fields, not the buffer pointer, so no memory corruption is possible.
+	 */
 	if (!kfifo_is_empty(&udev->rx_fifo))
 		mask |= EPOLLIN | EPOLLRDNORM;
 	/*

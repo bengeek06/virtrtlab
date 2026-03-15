@@ -27,6 +27,11 @@ Additional sysfs contract covered:
 
 import errno
 import os
+import select
+import subprocess
+import termios
+import time
+import tty
 
 import pytest
 
@@ -36,10 +41,40 @@ from conftest import (
     _insmod,
     _module_loaded,
     _rmmod,
+    dmesg_lines,
 )
 
 DEVICES_ROOT = f"{SYSFS_ROOT}/devices"
 BUS0_STATE   = f"{SYSFS_ROOT}/buses/vrtlbus0/state"
+
+TTY_DEV      = "/dev/ttyVIRTLAB0"
+WIRE_DEV     = "/dev/virtrtlab-wire0"
+READ_TIMEOUT = 2.0   # seconds
+
+
+def _open_raw_tty(path):
+    """Open a TTY in raw mode and return the fd."""
+    fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    tty.setraw(fd, termios.TCSANOW)
+    return fd
+
+
+def _read_with_timeout(fd, nbytes, timeout=READ_TIMEOUT):
+    """Read up to *nbytes* from *fd*, waiting at most *timeout* seconds."""
+    buf = b""
+    deadline = time.monotonic() + timeout
+    while len(buf) < nbytes:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        ready, _, _ = select.select([fd], [], [], remaining)
+        if not ready:
+            break
+        chunk = os.read(fd, nbytes - len(buf))
+        if not chunk:
+            break
+        buf += chunk
+    return buf
 
 
 # ---------------------------------------------------------------------------
@@ -150,17 +185,51 @@ class TestUartStatsReset:
 class TestUartStatsLoopback:
     """Stats counter increment under TX/RX load (issue #3 AC2)."""
 
-    @pytest.mark.skip(reason="Requires issue #2 wire device implementation")
     def test_tx_bytes_increments_under_load(self, uart_module):
         """tx_bytes must grow when bytes are sent through the wire device."""
+        tty_fd  = _open_raw_tty(TTY_DEV)
+        wire_fd = os.open(WIRE_DEV, os.O_RDWR | os.O_NONBLOCK)
+        try:
+            os.write(tty_fd, b"\xAA" * 64)
+            time.sleep(0.5)
+            tx = int(r(u("stats/tx_bytes")))
+            assert tx >= 64, f"stats/tx_bytes={tx} expected >= 64"
+        finally:
+            os.close(wire_fd)
+            os.close(tty_fd)
 
-    @pytest.mark.skip(reason="Requires issue #2 wire device implementation")
     def test_rx_bytes_increments_under_load(self, uart_module):
         """rx_bytes must grow when bytes arrive from the wire device."""
+        tty_fd  = _open_raw_tty(TTY_DEV)
+        wire_fd = os.open(WIRE_DEV, os.O_RDWR | os.O_NONBLOCK)
+        try:
+            os.write(wire_fd, b"\xBB" * 64)
+            time.sleep(0.1)
+            rx = int(r(u("stats/rx_bytes")))
+            assert rx >= 64, f"stats/rx_bytes={rx} expected >= 64"
+        finally:
+            os.close(wire_fd)
+            os.close(tty_fd)
 
-    @pytest.mark.skip(reason="Requires issue #2 wire device implementation")
     def test_drops_count_matches_drop_rate(self, uart_module):
         """drops counter must match TX bytes when drop_rate_ppm=1000000."""
+        w(u("stats/reset"), "0")
+        w(u("drop_rate_ppm"), "1000000")
+        tty_fd  = _open_raw_tty(TTY_DEV)
+        wire_fd = os.open(WIRE_DEV, os.O_RDWR | os.O_NONBLOCK)
+        try:
+            os.write(tty_fd, b"\xCC" * 64)
+            time.sleep(0.5)
+            tx    = int(r(u("stats/tx_bytes")))
+            drops = int(r(u("stats/drops")))
+            assert tx >= 64, f"stats/tx_bytes={tx}"
+            assert drops == tx, (
+                f"drops={drops} must equal tx_bytes={tx} with drop_rate_ppm=1000000"
+            )
+        finally:
+            os.close(wire_fd)
+            os.close(tty_fd)
+            w(u("drop_rate_ppm"), "0")
 
 
 # ---------------------------------------------------------------------------
@@ -246,19 +315,70 @@ class TestUartFaultInjectionRanges:
 # ---------------------------------------------------------------------------
 
 class TestUartFaultInjectionBehavior:
-    """Runtime fault injection behavior (issue #4 AC1–AC3) — requires issue #2."""
+    """Runtime fault injection behavior (issue #4 AC1–AC3)."""
 
-    @pytest.mark.skip(reason="Requires issue #2 wire device implementation")
     def test_drop_rate_ppm_full_drops_all_bytes(self, uart_module):
         """drop_rate_ppm=1000000: 100% of TX bytes must appear in stats/drops (AC1)."""
+        w(u("stats/reset"), "0")
+        w(u("drop_rate_ppm"), "1000000")
+        tty_fd  = _open_raw_tty(TTY_DEV)
+        wire_fd = os.open(WIRE_DEV, os.O_RDWR | os.O_NONBLOCK)
+        try:
+            os.write(tty_fd, b"\xAA" * 64)
+            time.sleep(0.5)
+            tx    = int(r(u("stats/tx_bytes")))
+            drops = int(r(u("stats/drops")))
+            assert tx >= 64, f"stats/tx_bytes={tx}"
+            assert drops == tx, (
+                f"drops={drops} must equal tx_bytes={tx} with drop_rate_ppm=1000000 (AC1)"
+            )
+        finally:
+            os.close(wire_fd)
+            os.close(tty_fd)
+            w(u("drop_rate_ppm"), "0")
 
-    @pytest.mark.skip(reason="Requires issue #2 wire device implementation")
     def test_bitflip_rate_ppm_full_corrupts_stream(self, uart_module):
         """bitflip_rate_ppm=1000000: wire device observes bit-flipped bytes (AC2)."""
+        w(u("bitflip_rate_ppm"), "1000000")
+        tty_fd  = _open_raw_tty(TTY_DEV)
+        wire_fd = os.open(WIRE_DEV, os.O_RDWR | os.O_NONBLOCK)
+        try:
+            payload = b"\x00" * 64
+            os.write(tty_fd, payload)
+            received = _read_with_timeout(wire_fd, len(payload))
+            assert len(received) > 0, "No bytes received on wire side"
+            assert received != payload[:len(received)], (
+                "With bitflip_rate_ppm=1000000, received bytes must differ from sent (AC2)"
+            )
+        finally:
+            os.close(wire_fd)
+            os.close(tty_fd)
+            w(u("bitflip_rate_ppm"), "0")
 
-    @pytest.mark.skip(reason="Requires issue #2 wire device implementation")
     def test_latency_ns_1ms_no_soft_lockup(self, uart_module):
         """latency_ns=1000000 at 115200 baud: dmesg must not show soft lockup (AC3)."""
+        baseline = set(dmesg_lines())
+        w(u("latency_ns"), "1000000")
+        tty_fd  = _open_raw_tty(TTY_DEV)
+        wire_fd = os.open(WIRE_DEV, os.O_RDWR | os.O_NONBLOCK)
+        attrs = termios.tcgetattr(tty_fd)
+        attrs[4] = attrs[5] = termios.B115200
+        termios.tcsetattr(tty_fd, termios.TCSANOW, attrs)
+        try:
+            for _ in range(10):
+                os.write(tty_fd, b"\xAA" * 64)
+                time.sleep(0.05)
+            time.sleep(1.0)
+            new_lines = [l for l in dmesg_lines() if l not in baseline]
+            soft_lockups = [l for l in new_lines if "soft lockup" in l.lower()]
+            assert not soft_lockups, (
+                f"Detected soft lockup in dmesg with latency_ns=1000000 (AC3):\n"
+                + "\n".join(soft_lockups)
+            )
+        finally:
+            os.close(wire_fd)
+            os.close(tty_fd)
+            w(u("latency_ns"), "0")
 
 
 # ---------------------------------------------------------------------------
