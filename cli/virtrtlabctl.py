@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -15,7 +16,12 @@ from pathlib import Path
 
 SYSFS_ROOT = "/sys/kernel/virtrtlab"
 RUN_DIR = "/run/virtrtlab"
-DAEMON_BIN = "virtrtlabd"
+# Resolved at import time: $VIRTRTLABD env var → repo-relative daemon/virtrtlabd → PATH
+_SCRIPT_DIR = Path(__file__).resolve().parent
+DAEMON_BIN = os.environ.get(
+    "VIRTRTLABD",
+    str(_SCRIPT_DIR.parent / "daemon" / "virtrtlabd"),
+)
 KNOWN_MODULES = ["virtrtlab_core", "virtrtlab_uart", "virtrtlab_gpio"]
 
 # type → (ko filename, insmod parameter name)
@@ -87,21 +93,43 @@ def _emit(data: "dict | list | str", json_flag: bool) -> None:
 def _find_ko(module_name: str, module_dir: str | None = None) -> Path:
     """Return path to <module_name>.ko; raise VirtrtlabError(1) if not found.
 
-    Search order: module_dir (if given) → ./ → /lib/modules/$(uname -r)/
+    Search order:
+      1. module_dir (if given)
+      2. ./
+      3. modinfo -n <module_name>  (handles make modules_install subdirs)
+      4. /lib/modules/$(uname -r)/<module_name>.ko  (flat fallback)
     """
     filename = f"{module_name}.ko"
     candidates: list[Path] = []
     if module_dir:
         candidates.append(Path(module_dir) / filename)
     candidates.append(Path(".") / filename)
-    try:
-        uname_r = subprocess.check_output(["uname", "-r"], text=True).strip()
-        candidates.append(Path(f"/lib/modules/{uname_r}") / filename)
-    except subprocess.SubprocessError:
-        pass
     for path in candidates:
         if path.exists():
             return path
+
+    # Try modinfo which knows the actual installed path (subdirs included)
+    try:
+        result = subprocess.run(
+            ["modinfo", "-n", module_name],
+            capture_output=True, text=True, check=True,
+        )
+        p = Path(result.stdout.strip())
+        if p.exists():
+            return p
+    except (subprocess.SubprocessError, OSError):
+        pass
+
+    # Flat fallback for /lib/modules/<uname -r>/
+    try:
+        uname_r = subprocess.check_output(["uname", "-r"], text=True).strip()
+        flat = Path(f"/lib/modules/{uname_r}") / filename
+        candidates.append(flat)
+        if flat.exists():
+            return flat
+    except subprocess.SubprocessError:
+        pass
+
     searched = ", ".join(str(p) for p in candidates)
     raise VirtrtlabError(f"{filename} not found (searched: {searched})", exit_code=1)
 
@@ -134,12 +162,34 @@ def _resolve_profile(args: argparse.Namespace) -> dict:
                 data = tomllib.load(fh)
             except tomllib.TOMLDecodeError as exc:
                 raise VirtrtlabError(f"profile parse error: {exc}", exit_code=2) from exc
-        profile["build"] = data.get("build", {})
-        profile["bus"] = data.get("bus", {})
-        profile["devices"] = [
-            {"type": d["type"], "count": int(d.get("count", 1))}
-            for d in data.get("devices", [])
-        ]
+        try:
+            profile["build"] = data.get("build", {})
+            profile["bus"] = data.get("bus", {})
+            raw_devices = data.get("devices", [])
+            if not isinstance(raw_devices, list):
+                raise VirtrtlabError(
+                    "profile parse error: 'devices' must be an array of tables",
+                    exit_code=2,
+                )
+            profile["devices"] = []
+            for i, d in enumerate(raw_devices):
+                if not isinstance(d, dict) or "type" not in d:
+                    raise VirtrtlabError(
+                        f"profile parse error: devices[{i}] missing 'type' key",
+                        exit_code=2,
+                    )
+                try:
+                    count = int(d.get("count", 1))
+                except (ValueError, TypeError) as exc:
+                    raise VirtrtlabError(
+                        f"profile parse error: devices[{i}].count must be an integer",
+                        exit_code=2,
+                    ) from exc
+                profile["devices"].append({"type": str(d["type"]), "count": count})
+        except VirtrtlabError:
+            raise
+        except (KeyError, TypeError, ValueError) as exc:
+            raise VirtrtlabError(f"profile parse error: {exc}", exit_code=2) from exc
 
     # Apply inline overrides (--uart N, --gpio N); they override matching entries
     inline: dict[str, int] = {}
@@ -190,33 +240,54 @@ def _is_module_loaded(name: str) -> bool:
     return False
 
 
-def _daemon_pid() -> int | None:
-    """Return daemon PID if the process is alive, else None."""
-    pid_file = Path(RUN_DIR) / "daemon.pid"
+def _daemon_pid(run_dir: str = RUN_DIR) -> int | None:
+    """Return daemon PID if virtrtlabd is alive, else None.
+
+    Validates /proc/<pid>/comm to avoid signalling a PID-recycled process.
+    Removes a stale pid-file if the recorded process is gone or mismatched.
+    """
+    pid_file = Path(run_dir) / "daemon.pid"
     try:
         pid = int(pid_file.read_text().strip())
-        if Path(f"/proc/{pid}").exists():
-            return pid
     except (OSError, ValueError):
-        pass
-    return None
+        return None
+    proc_dir = Path(f"/proc/{pid}")
+    if not proc_dir.exists():
+        pid_file.unlink(missing_ok=True)
+        return None
+    # Validate the process is actually virtrtlabd (guard against PID reuse)
+    comm_path = proc_dir / "comm"
+    try:
+        comm = comm_path.read_text().strip()
+        if comm != "virtrtlabd":
+            pid_file.unlink(missing_ok=True)
+            return None
+    except OSError:
+        pass  # /proc/<pid>/comm unreadable → assume still ours
+    return pid
 
 
 def _ensure_run_dir(no_sudo: bool) -> None:
     _run_cmd(_sudo_prefix(no_sudo) + ["mkdir", "-p", RUN_DIR], exit_code=1)
 
 
-def _write_run_file(filename: str, content: str, no_sudo: bool) -> None:
-    """Write content to RUN_DIR/<filename> via sudo tee (or directly if --no-sudo)."""
-    path = Path(RUN_DIR) / filename
+def _write_run_file(filename: str, content: str, no_sudo: bool, run_dir: str = RUN_DIR) -> None:
+    """Write content to <run_dir>/<filename> via sudo tee (or directly if --no-sudo)."""
+    path = Path(run_dir) / filename
     if no_sudo:
         path.write_text(content)
     else:
-        subprocess.run(
-            ["sudo", "tee", str(path)],
-            input=content, text=True,
-            stdout=subprocess.DEVNULL, check=True,
-        )
+        try:
+            subprocess.run(
+                ["sudo", "tee", str(path)],
+                input=content, text=True,
+                stdout=subprocess.DEVNULL, check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            raise VirtrtlabError(
+                f"failed to write {path}: sudo tee exited {exc.returncode}",
+                exit_code=1,
+            ) from exc
 
 
 def _insmod(ko_path: Path, param_name: str, count: int, no_sudo: bool) -> None:
@@ -234,9 +305,9 @@ def _rmmod(module_name: str, no_sudo: bool, *, ignore_error: bool = False) -> No
             raise
 
 
-def _stop_daemon(no_sudo: bool) -> None:
+def _stop_daemon(no_sudo: bool, run_dir: str = RUN_DIR) -> None:
     """SIGTERM the daemon, wait 5 s, SIGKILL if still alive."""
-    pid = _daemon_pid()
+    pid = _daemon_pid(run_dir)
     if pid is None:
         return
     prefix = _sudo_prefix(no_sudo)
@@ -248,7 +319,7 @@ def _stop_daemon(no_sudo: bool) -> None:
         time.sleep(0.1)
     if Path(f"/proc/{pid}").exists():
         subprocess.run(prefix + ["kill", "-KILL", str(pid)], check=False)
-    pid_file = Path(RUN_DIR) / "daemon.pid"
+    pid_file = Path(run_dir) / "daemon.pid"
     if pid_file.exists():
         subprocess.run(prefix + ["rm", "-f", str(pid_file)], check=False)
 
@@ -333,10 +404,17 @@ def cmd_up(args: argparse.Namespace) -> int:
     # Write bus seed if specified in profile
     seed = profile["bus"].get("seed")
     if seed is not None:
-        subprocess.run(
-            _sudo_prefix(no_sudo) + ["tee", f"{SYSFS_ROOT}/buses/vrtlbus0/seed"],
-            input=str(seed), text=True, stdout=subprocess.DEVNULL,
-        )
+        try:
+            subprocess.run(
+                _sudo_prefix(no_sudo) + ["tee", f"{SYSFS_ROOT}/buses/vrtlbus0/seed"],
+                input=str(seed), text=True,
+                stdout=subprocess.DEVNULL, check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            raise VirtrtlabError(
+                f"failed to write bus seed: tee exited {exc.returncode}",
+                exit_code=4,
+            ) from exc
 
     # Persist load order so that `down` can reverse it
     all_mod_order = [m for m in expected_module_names if _is_module_loaded(m)]
@@ -345,10 +423,11 @@ def cmd_up(args: argparse.Namespace) -> int:
     # Start daemon in background if not already running
     if _daemon_pid() is None:
         uart_count = sum(d["count"] for d in profile["devices"] if d["type"] == "uart")
-        subprocess.Popen(
+        proc = subprocess.Popen(
             _sudo_prefix(no_sudo) + [DAEMON_BIN, "--num-uarts", str(uart_count), "--run-dir", RUN_DIR],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
+        _write_run_file("daemon.pid", str(proc.pid) + "\n", no_sudo)
 
     # Poll all expected sockets (up to 5 s)
     expected_socks = _expected_sockets(profile)
@@ -378,7 +457,7 @@ def cmd_down(args: argparse.Namespace) -> int:
         )
         modules = list(KNOWN_MODULES)
 
-    _stop_daemon(no_sudo)
+    _stop_daemon(no_sudo, RUN_DIR)
 
     for module in reversed(modules):
         if _is_module_loaded(module):
@@ -541,11 +620,15 @@ def cmd_stats(args: argparse.Namespace) -> int:
     stats_dir = Path(SYSFS_ROOT) / "devices" / args.device / "stats"
     if not stats_dir.exists():
         raise VirtrtlabError(f"stats directory not found: {stats_dir}", exit_code=4)
-    stats: dict[str, str] = {}
+    stats: dict[str, "int | str"] = {}
     for f in sorted(stats_dir.iterdir()):
         if f.is_file():
             try:
-                stats[f.name] = f.read_text().strip()
+                raw = f.read_text().strip()
+                try:
+                    stats[f.name] = int(raw)
+                except ValueError:
+                    stats[f.name] = raw
             except OSError:
                 stats[f.name] = "<error>"
 
@@ -600,14 +683,14 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     num_uarts: int = args.num_uarts
     run_dir: str = args.run_dir
 
-    _ensure_run_dir(no_sudo)
+    _run_cmd(_sudo_prefix(no_sudo) + ["mkdir", "-p", run_dir], exit_code=1)
     proc = subprocess.Popen(
         _sudo_prefix(no_sudo) + [DAEMON_BIN, "--num-uarts", str(num_uarts), "--run-dir", run_dir],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    _write_run_file("daemon.pid", str(proc.pid) + "\n", no_sudo)
+    _write_run_file("daemon.pid", str(proc.pid) + "\n", no_sudo, run_dir=run_dir)
 
-    # Poll uart sockets
+    # Poll uart sockets in the correct run_dir
     expected_socks = [Path(run_dir) / f"uart{i}.sock" for i in range(num_uarts)]
     _poll_sockets(expected_socks)
 

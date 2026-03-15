@@ -76,7 +76,6 @@ class TestCmdSet:
         args = make_args("set", "uart0", "baud=9600", "latency_ns=500")
         rc = ctl.cmd_set(args)
         assert rc == 0
-        assert sysfs.read_text() if False else True  # just check no exception
         assert (sysfs / "baud").read_text() == "9600"
         assert (sysfs / "latency_ns").read_text() == "500"
 
@@ -136,7 +135,7 @@ class TestCmdStats:
         data = json.loads(capsys.readouterr().out)
         assert data["device"] == "uart0"
         assert "tx_bytes" in data["stats"]
-        assert data["stats"]["tx_bytes"] == "1048576"
+        assert data["stats"]["tx_bytes"] == 1048576  # int, not str
 
     def test_stats_missing_device_exit4(self, fake_sysfs):
         args = make_args("stats", "uart99")

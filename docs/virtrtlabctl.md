@@ -76,8 +76,8 @@ reverse module insertion order. Module list is read from `/run/virtrtlab/modules
 (written by `up`).
 
 If `modules.list` is absent, `down` prints a warning to stderr and attempts `rmmod`
-on all known modules (`virtrtlab_uart`, `virtrtlab_gpio`, `virtrtlab_core`) in that
-order. Exit `0` even if some modules were already unloaded; a missing module is not
+on all known modules (`virtrtlab_gpio`, `virtrtlab_uart`, `virtrtlab_core`) in that
+order (reverse of the standard load order: core last). Exit `0` even if some modules were already unloaded; a missing module is not
 an error on teardown.
 
 ### `status` — global lab status
