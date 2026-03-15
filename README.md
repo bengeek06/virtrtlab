@@ -131,9 +131,8 @@ Fault injection and device configuration are done exclusively via **sysfs**:
 |   |-- cli/
 |   |-- helpers/
 |   `-- fixtures/
-`-- userspace/
+`-- cli/
   |-- README.md
-  |-- virtrtlabd.py
   `-- virtrtlabctl.py
 ```
 
