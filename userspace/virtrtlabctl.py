@@ -5,6 +5,7 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 import tomllib
 from pathlib import Path
 
@@ -173,20 +174,277 @@ def _resolve_profile(args: argparse.Namespace) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Command stubs (implemented in T3–T6)
+# Runtime helpers (T3 / T4)
+# ---------------------------------------------------------------------------
+
+
+def _is_module_loaded(name: str) -> bool:
+    """Return True iff the module appears in /proc/modules."""
+    try:
+        with open("/proc/modules") as fh:
+            for line in fh:
+                if line.split()[0] == name:
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+def _daemon_pid() -> int | None:
+    """Return daemon PID if the process is alive, else None."""
+    pid_file = Path(RUN_DIR) / "daemon.pid"
+    try:
+        pid = int(pid_file.read_text().strip())
+        if Path(f"/proc/{pid}").exists():
+            return pid
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _ensure_run_dir(no_sudo: bool) -> None:
+    _run_cmd(_sudo_prefix(no_sudo) + ["mkdir", "-p", RUN_DIR], exit_code=1)
+
+
+def _write_run_file(filename: str, content: str, no_sudo: bool) -> None:
+    """Write content to RUN_DIR/<filename> via sudo tee (or directly if --no-sudo)."""
+    path = Path(RUN_DIR) / filename
+    if no_sudo:
+        path.write_text(content)
+    else:
+        subprocess.run(
+            ["sudo", "tee", str(path)],
+            input=content, text=True,
+            stdout=subprocess.DEVNULL, check=True,
+        )
+
+
+def _insmod(ko_path: Path, param_name: str, count: int, no_sudo: bool) -> None:
+    cmd = _sudo_prefix(no_sudo) + ["insmod", str(ko_path)]
+    if param_name:
+        cmd.append(f"{param_name}={count}")
+    _run_cmd(cmd, exit_code=1)
+
+
+def _rmmod(module_name: str, no_sudo: bool, *, ignore_error: bool = False) -> None:
+    try:
+        _run_cmd(_sudo_prefix(no_sudo) + ["rmmod", module_name], exit_code=1)
+    except VirtrtlabError:
+        if not ignore_error:
+            raise
+
+
+def _stop_daemon(no_sudo: bool) -> None:
+    """SIGTERM the daemon, wait 5 s, SIGKILL if still alive."""
+    pid = _daemon_pid()
+    if pid is None:
+        return
+    prefix = _sudo_prefix(no_sudo)
+    subprocess.run(prefix + ["kill", "-TERM", str(pid)], check=False)
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if not Path(f"/proc/{pid}").exists():
+            break
+        time.sleep(0.1)
+    if Path(f"/proc/{pid}").exists():
+        subprocess.run(prefix + ["kill", "-KILL", str(pid)], check=False)
+    pid_file = Path(RUN_DIR) / "daemon.pid"
+    if pid_file.exists():
+        subprocess.run(prefix + ["rm", "-f", str(pid_file)], check=False)
+
+
+def _poll_sockets(sock_paths: list[Path], timeout: float = 5.0) -> None:
+    """Block until all sock_paths exist; raise VirtrtlabError(3) on timeout."""
+    deadline = time.monotonic() + timeout
+    remaining = list(sock_paths)
+    while remaining:
+        remaining = [p for p in remaining if not p.exists()]
+        if not remaining:
+            break
+        if time.monotonic() >= deadline:
+            missing = ", ".join(str(p) for p in remaining)
+            raise VirtrtlabError(
+                f"timeout waiting for sockets: {missing}", exit_code=3
+            )
+        time.sleep(0.1)
+
+
+def _expected_sockets(profile: dict) -> list[Path]:
+    """Return expected socket paths for UART devices in the profile."""
+    run = Path(RUN_DIR)
+    return [
+        run / f"uart{i}.sock"
+        for dev in profile["devices"]
+        if dev["type"] == "uart"
+        for i in range(dev["count"])
+    ]
+
+
+def _modules_load_order(profile: dict) -> list[str]:
+    """Return module names in load order: core first, then device modules."""
+    names: list[str] = ["virtrtlab_core"]
+    for dev in profile["devices"]:
+        name = MODULE_MAP[dev["type"]][0].removesuffix(".ko")
+        if name not in names:
+            names.append(name)
+    return names
+
+
+# ---------------------------------------------------------------------------
+# Commands
 # ---------------------------------------------------------------------------
 
 
 def cmd_up(args: argparse.Namespace) -> int:
-    raise NotImplementedError("cmd_up not yet implemented")
+    profile = _resolve_profile(args)
+    no_sudo: bool = args.no_sudo
+    module_dir: str | None = profile["build"].get("module_dir")
+
+    # Idempotence: all expected modules loaded + daemon alive → warn and exit 0
+    expected_module_names = _modules_load_order(profile)
+    if (
+        all(_is_module_loaded(m) for m in expected_module_names)
+        and _daemon_pid() is not None
+    ):
+        print("warning: lab already up (modules loaded, daemon running)", file=sys.stderr)
+        return 0
+
+    _ensure_run_dir(no_sudo)
+
+    # Build ordered load list: core first, then device modules
+    modules_to_load: list[tuple[str, str, int]] = [("virtrtlab_core", "", 0)]
+    for dev in profile["devices"]:
+        ko_filename, param_name = MODULE_MAP[dev["type"]]
+        modules_to_load.append((ko_filename.removesuffix(".ko"), param_name, dev["count"]))
+
+    loaded_this_run: list[str] = []
+    for module_name, param_name, count in modules_to_load:
+        if _is_module_loaded(module_name):
+            continue
+        ko_path = _find_ko(module_name, module_dir)
+        try:
+            _insmod(ko_path, param_name, count, no_sudo)
+            loaded_this_run.append(module_name)
+        except VirtrtlabError:
+            for m in reversed(loaded_this_run):
+                _rmmod(m, no_sudo, ignore_error=True)
+            raise
+
+    # Write bus seed if specified in profile
+    seed = profile["bus"].get("seed")
+    if seed is not None:
+        subprocess.run(
+            _sudo_prefix(no_sudo) + ["tee", f"{SYSFS_ROOT}/buses/vrtlbus0/seed"],
+            input=str(seed), text=True, stdout=subprocess.DEVNULL,
+        )
+
+    # Persist load order so that `down` can reverse it
+    all_mod_order = [m for m in expected_module_names if _is_module_loaded(m)]
+    _write_run_file("modules.list", "\n".join(all_mod_order) + "\n", no_sudo)
+
+    # Start daemon in background if not already running
+    if _daemon_pid() is None:
+        uart_count = sum(d["count"] for d in profile["devices"] if d["type"] == "uart")
+        subprocess.Popen(
+            _sudo_prefix(no_sudo) + [DAEMON_BIN, "--num-uarts", str(uart_count), "--run-dir", RUN_DIR],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+    # Poll all expected sockets (up to 5 s)
+    expected_socks = _expected_sockets(profile)
+    if expected_socks:
+        _poll_sockets(expected_socks)
+
+    if args.json:
+        _emit(
+            {"status": "up", "modules": all_mod_order, "sockets": [str(s) for s in expected_socks]},
+            True,
+        )
+    else:
+        print(f"lab up — modules: {', '.join(all_mod_order)}")
+    return 0
 
 
 def cmd_down(args: argparse.Namespace) -> int:
-    raise NotImplementedError("cmd_down not yet implemented")
+    no_sudo: bool = args.no_sudo
+    modules_list_file = Path(RUN_DIR) / "modules.list"
+
+    if modules_list_file.exists():
+        modules = [m.strip() for m in modules_list_file.read_text().splitlines() if m.strip()]
+    else:
+        print(
+            f"warning: {modules_list_file} not found — attempting rmmod on known modules",
+            file=sys.stderr,
+        )
+        modules = list(KNOWN_MODULES)
+
+    _stop_daemon(no_sudo)
+
+    for module in reversed(modules):
+        if _is_module_loaded(module):
+            _rmmod(module, no_sudo, ignore_error=True)
+
+    # Best-effort cleanup of state files
+    prefix = _sudo_prefix(no_sudo)
+    if modules_list_file.exists():
+        subprocess.run(prefix + ["rm", "-f", str(modules_list_file)], check=False)
+
+    return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    raise NotImplementedError("cmd_status not yet implemented")
+    # Modules
+    module_info: dict[str, str] = {
+        name: "loaded" if _is_module_loaded(name) else "not loaded"
+        for name in KNOWN_MODULES
+    }
+
+    # Daemon
+    pid = _daemon_pid()
+    daemon_info: dict = (
+        {"state": "running", "pid": pid} if pid else {"state": "stopped", "pid": None}
+    )
+
+    # Sockets
+    run = Path(RUN_DIR)
+    sockets = sorted(str(p) for p in run.glob("*.sock")) if run.exists() else []
+
+    # Bus state
+    bus_state_path = Path(SYSFS_ROOT) / "buses" / "vrtlbus0" / "state"
+    bus_state = bus_state_path.read_text().strip() if bus_state_path.exists() else "unknown"
+
+    if args.json:
+        _emit(
+            {
+                "modules": module_info,
+                "daemon": daemon_info,
+                "sockets": sockets,
+                "bus": {"vrtlbus0": {"state": bus_state}},
+            },
+            True,
+        )
+    else:
+        print("modules:")
+        for name, state in module_info.items():
+            print(f"  {name:<25} {state}")
+        print()
+        print("daemon:")
+        if pid:
+            print(f"  pid    {pid}")
+            print(f"  state  running")
+        else:
+            print(f"  state  stopped")
+        print()
+        print("sockets:")
+        for sock in sockets:
+            print(f"  {sock}")
+        if not sockets:
+            print("  (none)")
+        print()
+        print("bus vrtlbus0:")
+        print(f"  state  {bus_state}")
+
+    return 0
 
 
 def cmd_list(args: argparse.Namespace) -> int:
