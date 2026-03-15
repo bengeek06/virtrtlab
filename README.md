@@ -131,9 +131,8 @@ Fault injection and device configuration are done exclusively via **sysfs**:
 |   |-- cli/
 |   |-- helpers/
 |   `-- fixtures/
-`-- userspace/
+`-- cli/
   |-- README.md
-  |-- virtrtlabd.py
   `-- virtrtlabctl.py
 ```
 
@@ -231,7 +230,7 @@ The kernel applies fault injection (latency, jitter, drop, bitflip) **before** d
 - `/run/virtrtlab/uart0.sock` (`AF_UNIX`, `SOCK_STREAM`, raw bytes)
 - `/run/virtrtlab/uart1.sock`, …
 
-The simulator connects and exchanges raw bytes — no framing, no length prefix. `virtrtlabd` relays bytes between the wire device and the socket using `select()`.
+The simulator connects and exchanges raw bytes — no framing, no length prefix. `virtrtlabd` relays bytes between the wire device and the socket using `epoll`.
 
 ### Control
 
@@ -251,8 +250,14 @@ socat - UNIX-CONNECT:/run/virtrtlab/uart0.sock
 
 ## 5) CLI conventions (`virtrtlabctl`)
 
+Full contract: [`docs/virtrtlabctl.md`](docs/virtrtlabctl.md).
+
 Command structure:
 
+- Lab orchestration:
+  - `virtrtlabctl up [--config lab.toml] [--uart N] [--gpio N]` — load modules + start daemon
+  - `virtrtlabctl down` — stop daemon + unload modules
+  - `virtrtlabctl status` — global lab state (modules, daemon, sockets, bus)
 - Discovery:
   - `virtrtlabctl list buses`
   - `virtrtlabctl list devices`
@@ -267,18 +272,17 @@ Command structure:
   - `virtrtlabctl stats gpio0` — display all stats counters for gpio0
   - `virtrtlabctl reset uart0` — reset stats counters only (equivalent to writing `0` to `stats/reset`); for a full device reset including fault attrs and `enabled`, write `reset` to the bus `state` attr
   - `virtrtlabctl reset gpio0` — reset GPIO stats counters only
-- Daemon lifecycle:
+- Daemon lifecycle (independent of module management):
   - `virtrtlabctl daemon start`
   - `virtrtlabctl daemon stop`
   - `virtrtlabctl daemon status`
 
-Output rules:
+Global flags: `--json` for machine parsing, `--no-sudo` for callers with existing privileges.
 
-- Human-readable by default
-- `--json` for machine parsing
-- Exit codes:
+Exit codes:
   - `0` success
-  - `2` invalid args
+  - `1` module load/unload failure
+  - `2` invalid args or profile parse error
   - `3` daemon/socket error
   - `4` kernel attribute write rejected
 
@@ -297,11 +301,10 @@ To make CI results meaningful:
 Recommended CI pattern:
 
 1. Boot test image / VM (or container with privileged kernel access)
-2. Load modules (`virtrtlab_core` + needed peripherals)
-3. Load the `v0.1.0` MVP stack (`virtrtlab_uart`, `virtrtlab_gpio`, `virtrtlabd`, `virtrtlabctl`); the bus `vrtlbus0` and devices register automatically at `module_init()`
-4. Run centralized tests from `tests/` under different VirtRTLab fault profiles
-5. Collect logs + VirtRTLab stats + kernel traces (ftrace, lockdep, perf sched)
-6. Export machine-readable test results for GitHub Actions artifacts and annotations
+2. `virtrtlabctl up --config lab.toml` — loads modules and starts `virtrtlabd`
+3. Run centralized tests from `tests/` under different VirtRTLab fault profiles
+4. Collect logs + VirtRTLab stats + kernel traces (ftrace, lockdep, perf sched)
+5. Export machine-readable test results for GitHub Actions artifacts and annotations
 
 ---
 

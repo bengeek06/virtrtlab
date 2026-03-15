@@ -1,6 +1,6 @@
-# Userspace tooling
+# CLI tooling
 
-The `v0.1.0` userspace target is split into two roles:
+The `v0.1.0` CLI target is split into two roles:
 
 - `virtrtlabd` — daemon for streamed peripherals in the MVP (UART first), exposing one AF_UNIX socket per device under `/run/virtrtlab/`
 - `virtrtlabctl` — CLI for discovery, sysfs get/set helpers, stats export, and daemon lifecycle
