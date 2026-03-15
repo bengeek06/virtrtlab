@@ -129,121 +129,280 @@ Counters are reset by writing `0` to `stats/reset`. Counters wrap silently at `U
 
 ## Devices — GPIO (`gpio0`, `gpio1`, …)
 
-`v0.1.0` includes `virtrtlab_gpio` as the second reference peripheral family. Unlike UART, GPIO is intentionally **state-oriented** rather than stream-oriented and does not require the daemon socket path in the MVP.
+> **v0.2.0** — replaces the v0.1.0 custom banked GPIO model. `virtrtlab_gpio` now acts
+> as a fault-injection overlay on top of the Linux `gpio-sim` driver. The custom
+> `direction`, `value`, `active_low`, `edge_rising`, and `edge_falling` sysfs attrs are
+> **retired**. The AUT now communicates via the standard GPIO v2 character device API.
 
-### Device model
+### Overview
 
-Each `gpioN` device models **one logical bank of 8 lines**. There is no per-line device in `v0.1.0`. Bank numbering is 0-based and follows the `num_gpio_banks` module parameter.
+`virtrtlab_gpio` is a **thin fault-injection shim** layered on top of the Linux
+`gpio-sim` driver (Linux ≥ 5.17, `CONFIG_GPIO_SIM`). `gpio-sim` creates a
+fully-standard gpiochip visible to the AUT via `/dev/gpiochipN`. VirtRTLab registers a
+shim on that chip's data path to intercept harness-injected line transitions and apply
+configurable fault injection (latency, jitter, drop, bitflip) before the transition
+reaches the AUT.
 
-Ownership rules:
+Two distinct control planes exist:
 
-- when a `direction` bit is `0`, the AUT observes that bit as an input and userspace may drive it by writing `value` through sysfs
-- when a `direction` bit is `1`, the AUT drives that bit as an output and sysfs can only observe it
-- `value`, edge detection, and all counters are expressed in **logical** bank state after `active_low` has been applied
+- **AUT interface**: `/dev/gpiochipN` — standard GPIO v2 character device API
+- **Harness control plane**: `/sys/kernel/virtrtlab/devices/gpioN/` — fault attrs and
+  stats only (no direct line-state writes)
+- **Harness injection path**: gpio-sim debugfs — the harness drives input line state
+  here; VirtRTLab intercepts and applies fault injection
 
-### Attributes
+### Device provisioning
 
-| Attribute | Access | Type | Allowed values | Description |
+On module load, `virtrtlab_gpio` provisions one `gpio-sim` chip per `gpioN` instance.
+Each chip has `num_lines` lines (default: 8). The chip label in the gpiolib subsystem is
+`"virtrtlab-gpioN"` (e.g. `"virtrtlab-gpio0"` for the first instance).
+
+The gpiochip appears at `/dev/gpiochipN` where `N` is assigned dynamically by the kernel
+gpiolib. The mapping from VirtRTLab instance name to `/dev` path is exposed via the
+`chip_path` sysfs attr (see table below).
+
+`virtrtlab_gpio` declares `softdep: pre: gpio-sim`. Loading `virtrtlab_gpio.ko` when
+`gpio-sim` is absent returns `-ENODEV`; the module does not remain resident.
+
+> **Open 5:** Should `num_lines` be a per-bank sysfs attr settable before module load, a
+> module parameter, or fixed at 8?
+
+### AUT interface
+
+The AUT communicates with the simulated GPIO chip exclusively via the **GPIO v2
+character device API** on `/dev/gpiochipN`:
+
+| AUT operation | ioctl / syscall | Description |
+|---|---|---|
+| Identify chip | `GPIO_GET_CHIPINFO_IOCTL` | Returns label `"virtrtlab-gpio0"`, name, and line count |
+| Request lines | `GPIO_V2_GET_LINE_IOCTL` | Allocate one or more lines with direction, edge-detection, bias, and active-low flags |
+| Read line values | `GPIO_V2_LINE_GET_VALUES_IOCTL` | Read current logical value of requested lines |
+| Drive output lines | `GPIO_V2_LINE_SET_VALUES_IOCTL` | Write output line state |
+| Wait for edge events | `read()` on line fd | Block until a subscribed edge event arrives |
+| Poll for events | `poll()` on line fd | `POLLIN` when an edge event is pending |
+
+Line direction (input / output), edge-detection interest (rising / falling / both), bias,
+and active-low polarity are **all set by the AUT at line-request time** via `ioctl`
+flags. VirtRTLab does not expose `direction`, `active_low`, or edge masks in sysfs.
+
+`ioctl(fd, GPIO_GET_CHIPINFO_IOCTL)` returns:
+- `name`: `"virtrtlab-gpio0"` (or `"virtrtlab-gpioN"`)
+- `label`: same as name
+- `lines`: `num_lines` (default 8)
+
+### Harness control plane — VirtRTLab sysfs
+
+`/sys/kernel/virtrtlab/devices/gpioN/`
+
+#### Identity attrs
+
+| Attribute | Access | Type | Description |
+|---|---|---|---|
+| `type` | ro | string | `"gpio"` |
+| `bus` | ro | string | Parent bus, e.g. `vrtlbus0` |
+| `num_lines` | ro | u8 | Number of lines provisioned in the gpio-sim chip (default: `8`) |
+| `chip_path` | ro | string | Absolute path to the AUT-facing character device, e.g. `/dev/gpiochip2`. Allows harness scripts to locate the correct `/dev` node without scanning all gpiochips. |
+
+#### Fault attrs
+
+Semantics identical to the common fault attrs defined above, adapted for GPIO:
+
+| Attribute | Access | Type | Default | Constraints |
 |---|---|---|---|---|
-| `direction` | rw | u8 mask | `0x00..0xFF` | Per-bit ownership mask. `1` = AUT output, `0` = AUT input |
-| `value` | rw/ro | u8 mask | `0x00..0xFF` | Read returns the current logical bank value. Write injects a logical bank value toward AUT-input bits only. Bits owned by the AUT are ignored on write and remain unchanged |
-| `active_low` | rw | u8 mask | `0x00..0xFF` | Per-bit logical inversion mask applied to readback, writes, and edge matching |
-| `edge_rising` | rw | u8 mask | `0x00..0xFF` | Per-bit mask enabling rising-edge event detection on AUT-input bits |
-| `edge_falling` | rw | u8 mask | `0x00..0xFF` | Per-bit mask enabling falling-edge event detection on AUT-input bits |
-| `stats/value_changes` | ro | u64 | n/a | Count of logical line transitions actually applied after fault handling |
-| `stats/edge_events` | ro | u64 | n/a | Count of individual bit transitions that match the enabled edge masks |
-| `stats/drops` | ro | u64 | n/a | Count of dropped `value` write operations suppressed by `drop_rate_ppm` |
-| `stats/reset` | wo | u8 | `0` | Writing `0` resets all GPIO counters atomically; any other value returns `-EINVAL` |
+| `enabled` | rw | bool | `1` | Device-level gate. `0` disables fault injection (shim passes all harness writes through immediately with no latency, drop, or bitflip). Does **not** affect the AUT-facing `/dev/gpiochipN` device. |
+| `latency_ns` | rw | u64 | `0` | Delay between harness injection write and AUT line-state update (ns). |
+| `jitter_ns` | rw | u64 | `0` | Uniform jitter amplitude (ns) added to `latency_ns` per transition; sampled as a uniform random value in $[0, \text{jitter\_ns}]$. |
+| `drop_rate_ppm` | rw | u32 | `0` | Probability of suppressing a harness-injected line transition (parts per million, per transfer unit). |
+| `bitflip_rate_ppm` | rw | u32 | `0` | Probability of inverting a harness-injected line value before delivery to the AUT (parts per million, per transfer unit). |
 
-Mask-format rules for `direction`, `value`, `active_low`, `edge_rising`, and `edge_falling`:
+### Harness injection path
 
-- Writes accept only lowercase or uppercase hexadecimal in the exact form `0xNN`, where `NN` is two hex digits
-- Decimal, octal, signed, whitespace-padded, or shortened forms such as `1`, `01`, `0x1`, and `255` return `-EINVAL`
-- Reads return the canonical lowercase form `0xnn` followed by `\n`
+The harness drives **input lines** by writing to the gpio-sim debugfs interface:
 
-Bit numbering is LSB-first: bit 0 is mask `0x01`, bit 7 is mask `0x80`.
+```
+/sys/kernel/debug/gpio-sim/<chip-label>/<lineN>/value
+```
 
-All GPIO masks and counters are defined in the **logical** domain after `active_low` has been applied. In particular, a userspace write to `value` expresses the requested logical bank state, `value` readback reports the logical bank state, edge matching is performed on logical transitions, and `bitflip_rate_ppm` flips one random AUT-input bit in that logical bank value before delivery.
+where `<chip-label>` matches the `chip_path` attr basename (e.g.
+`/sys/kernel/debug/gpio-sim/virtrtlab-gpio0/`), and `<lineN>` is the debugfs line name
+assigned by gpio-sim (e.g. `line0`, `line1`, …, `line7`).
 
-### Fault attribute semantics
+Write `0` for logical low, `1` for logical high. Values are in the **physical** domain:
+gpio-sim does not apply active-low inversion at the debugfs layer. The AUT's per-line
+active-low flag (set via `GPIO_V2_GET_LINE_IOCTL`) affects how the AUT reads the value,
+not how the harness writes it.
 
-For GPIO, the common fault attrs apply only to **sysfs writes to `value`** and only to bits configured as AUT inputs:
+> **Open 1:** Should VirtRTLab expose a `value` sysfs attr at
+> `/sys/kernel/virtrtlab/devices/gpioN/value` as a stable per-bank (or per-line) harness
+> injection surface that internally wraps the gpio-sim debugfs write? This would preserve
+> harness script compatibility with v0.1.0 and decouple harness scripts from the
+> debugfs path structure.
 
-- `latency_ns` delays delivery of the bank update
-- `jitter_ns` adds uniform delay variation on top of `latency_ns`
-- `drop_rate_ppm` suppresses the whole bank write, leaves the logical bank value unchanged, and increments `stats/drops`
-- `bitflip_rate_ppm` flips one random AUT-input bit within the requested bank value before delivery. If the flipped value produces no effective bit transition, the write succeeds but `stats/value_changes` does not increment for that bit
+> **Open 6:** Should VirtRTLab expose a read-only `active_low` attr derived from gpio-sim
+> internal state, so harness scripts can compute the correct physical injection value for a
+> given AUT-requested logical polarity?
 
-These attrs do not alter AUT-driven output transitions in `v0.1.0`.
+### Fault injection shim — observable behaviour
 
-If a delayed GPIO bank write is pending, all four decisions above are made from the snapshotted attribute values captured when that `value` write was accepted; later sysfs writes affect only subsequently accepted bank writes.
+When the harness writes a value to a gpio-sim debugfs line file, the shim executes the
+following sequence before the new state reaches the AUT:
 
-### Direction, edge, and reset semantics
+1. **Snapshot** — the shim captures the current `latency_ns`, `jitter_ns`,
+   `drop_rate_ppm`, `bitflip_rate_ppm`, and requested line value at the moment the debugfs
+   write is processed. Later sysfs writes to fault attrs do not retroactively modify a
+   transition already in the shim pipeline.
+2. **`enabled` check** — if `enabled=0` the shim is bypassed: the written value is
+   committed immediately to the AUT-facing line state, no fault evaluation occurs, no
+   counter is updated.
+3. **Drop gate** — one PRNG draw is taken. If `drop_rate_ppm` fires, the transition is
+   suppressed: the line value is rolled back to its previous state, `stats/drops` is
+   incremented, and the sequence terminates — no AUT notification is generated.
+4. **Bitflip gate** — one PRNG draw is taken. If `bitflip_rate_ppm` fires, the delivered
+   value is inverted (physical domain). `stats/bitflips` is incremented.
+5. **Latency scheduling** — the shim schedules delivery after
+   `latency_ns + uniform_random(0, jitter_ns)` nanoseconds via a per-line hrtimer.
+6. **Commit** — on timer expiry, the (possibly bitflipped) value is committed to the
+   AUT-facing line state. If the AUT has subscribed to edge events for this line and a
+   matching transition occurred:
+   - an edge event is enqueued in the AUT's line fd
+   - `stats/edge_events` is incremented by 1
+   - `stats/value_changes` is incremented by 1 for each line whose logical state changed
+     (from the AUT's perspective, after its own active-low flag is applied)
+7. **No-transition case** — if the committed value equals the previous state (e.g. a
+   bitflip caused a round-trip back to the original value), `stats/value_changes` does
+   **not** increment for that line.
 
-- Writes to `edge_rising` and `edge_falling` are masked by `~direction`; output-owned bits are stored as `0`
-- A sysfs write to `value` updates only AUT-input bits; output-owned bits read back exactly as last driven by the AUT
-- Writes to `value` while the device is disabled (`enabled=0`) or while the bus state is `down` return `-EIO`
-- Bus `state=reset` clears `latency_ns`, `jitter_ns`, `drop_rate_ppm`, `bitflip_rate_ppm`, resets all GPIO counters, sets `enabled=1`, and preserves `direction`, `active_low`, edge masks, and the current logical bank value
+PRNG draws use the bus-level xorshift32 PRNG (`buses/vrtlbus0/seed`). Draw order across
+devices on the same bus is the same interleaved order as for UART.
 
-Counter units for GPIO are intentionally mixed and must be read literally:
+> **Open 2:** Is the shim notification hook (step 1 above) implementable using only
+> public gpiolib APIs (`gpio_chip` ops wrapper or `irq_chip` shim), or does it require
+> modifications to `gpio-sim.c`? The answer bounds what can be deterministically specified
+> here. If the hook requires in-tree changes, this spec is subject to revision once the
+> implementation boundary is confirmed.
 
-- `stats/value_changes` counts individual logical bit transitions that were actually applied to AUT-input bits
-- `stats/edge_events` counts individual logical bit transitions that matched the enabled edge masks
-- `stats/drops` counts suppressed `value` write operations, one increment per dropped bank write regardless of how many bits that write would have changed
+### Transfer unit (v0.2.0)
+
+For GPIO, one transfer unit = **one harness write to a single gpio-sim debugfs line value
+file**. The transfer unit is evaluated once per write, independent of whether the requested
+value matches the current line state (though a no-change write may resolve to zero
+`stats/value_changes` increments at commit time).
+
+The `drop_rate_ppm` and `bitflip_rate_ppm` decisions are taken **per line per write** —
+if a future API allows multi-line atomic writes, each line is evaluated independently.
+
+### Stats
+
+`/sys/kernel/virtrtlab/devices/gpioN/stats/`
+
+| Attribute | Type | Description |
+|---|---|---|
+| `value_changes` | u64 | Count of line transitions actually applied to the AUT-facing line state after fault handling and latency timer expiry. One increment per affected line per committed write. |
+| `edge_events` | u64 | Count of edge events enqueued in AUT line fds as a result of applied transitions, summed over all subscribed lines. Only rising/falling events matching the AUT's ioctl-registered edge interest are counted. |
+| `drops` | u64 | Count of harness-injected line transitions suppressed by `drop_rate_ppm`. One increment per suppressed write (per transfer unit). |
+| `bitflips` | u64 | Count of harness-injected line transitions whose value was inverted by `bitflip_rate_ppm` before delivery. New in v0.2.0. |
+| `reset` | wo | Writing `0` resets all GPIO stats counters atomically. Any other value returns `-EINVAL`. `read()` returns `-EPERM`. |
+
+Counters wrap silently at `UINT64_MAX` (modular arithmetic, no saturation). Bus
+`state=reset` resets all GPIO stats counters and resets fault attrs to `0`/`1` (same as
+UART); it does **not** affect line state or the AUT's open line descriptors.
+
+### Kernel configuration requirements
+
+| Kconfig symbol | Required | Notes |
+|---|---|---|
+| `CONFIG_GPIO_SIM` | mandatory | gpio-sim driver (Linux ≥ 5.17) |
+| `CONFIG_GPIO_CDEV` | mandatory | `/dev/gpiochipN` character device; enabled by default when `CONFIG_GPIOLIB=y` (Linux ≥ 5.10) |
+| `CONFIG_GPIOLIB` | mandatory | Core gpiolib |
+| `CONFIG_CONFIGFS_FS` | mandatory | Required by gpio-sim chip provisioning (module load) |
+| `CONFIG_DEBUG_FS` | mandatory | Required for the harness injection path (`gpio-sim` debugfs) |
 
 ### Error behaviour
 
-The GPIO error model is based on a **standard memory-mapped banked GPIO controller** as exposed through Linux `gpiolib`, with Xilinx AXI GPIO used as a representative reference shape for `v0.1.0`. VirtRTLab specifies only the observable sysfs contract below; legacy `/sys/class/gpio` export semantics and line-reservation errors are out of scope.
-
-| Condition | Kernel behaviour |
+| Condition | Behaviour |
 |---|---|
-| `direction`, `value`, `active_low`, `edge_rising`, or `edge_falling` write not matching the strict `0xNN` format | return `-EINVAL` |
+| `insmod virtrtlab_gpio.ko` with `gpio-sim` not loaded | return `-ENODEV`; module does not remain resident |
 | `latency_ns`/`jitter_ns` write > 10 000 000 000 ns | return `-EINVAL` |
 | `drop_rate_ppm`/`bitflip_rate_ppm` write > 1 000 000 | return `-EINVAL` |
 | `stats/reset` write value other than `0` | return `-EINVAL` |
-| `read()` on `stats/reset` | returns `-EPERM` (write-only attribute; no `show()` callback registered) |
-| `value` write while `enabled=0` | return `-EIO` |
-| `value` write while bus `state=down` | return `-EIO` |
-| `value` write with one or more bits owned by the AUT (`direction=1`) | succeeds; those output-owned bits are ignored and retain the last AUT-driven logical state |
-| `edge_rising`/`edge_falling` write with one or more bits owned by the AUT (`direction=1`) | succeeds; those output-owned bits are stored as `0` |
+| `read()` on `stats/reset` | return `-EPERM` |
+| Harness writes to gpio-sim debugfs while `enabled=0` | passed through without fault injection; no error returned |
+| AUT `open("/dev/gpiochipN")` | always succeeds regardless of `enabled` or bus `state` |
+| AUT requests a line as output; harness writes to that line's debugfs value | write succeeds; gpio-sim ignores harness writes on AUT-owned output lines |
+| `rmmod virtrtlab_gpio` with AUT holding open line fds | gpio-sim chip is removed; open line fds return `-ENODEV` on subsequent ioctl |
 
-No `-EBUSY` condition is specified for GPIO in `v0.1.0`: VirtRTLab does not model per-line userspace export, descriptor reservation, or exclusive IRQ ownership at the sysfs interface level.
+> **Open 3:** What stable path does the harness use to locate `/dev/gpiochipN`? The
+> `chip_path` attr is proposed as the primary mechanism. An alternative is a udev rule
+> that creates a symlink at `/dev/virtrtlab-gpio0`. Decision needed before v0.2.0 is
+> tagged.
+
+> **Open 4:** Does `bus state=down` block or pass-through harness GPIO injection? For
+> UART, `state=down` halts the daemon path. For GPIO, gpio-sim is a separate subsystem and
+> `state=down` does not automatically propagate to it. Aligning semantics across device
+> families is desirable but requires an explicit decision.
 
 ### Test-oriented examples
 
-Drive one input bit high and count a rising edge:
+Discover the chip path and drive line 0 high:
 
 ```sh
-echo 0x00 > /sys/kernel/virtrtlab/devices/gpio0/direction
-echo 0x01 > /sys/kernel/virtrtlab/devices/gpio0/edge_rising
-echo 0x01 > /sys/kernel/virtrtlab/devices/gpio0/value
-cat /sys/kernel/virtrtlab/devices/gpio0/stats/value_changes
-cat /sys/kernel/virtrtlab/devices/gpio0/stats/edge_events
+CHIP=$(cat /sys/kernel/virtrtlab/devices/gpio0/chip_path)  # e.g. /dev/gpiochip2
+CHIP_LABEL=$(gpiodetect | awk -v chip="$CHIP" '$0 ~ chip { print $2 }')  # e.g. virtrtlab-gpio0
+echo 1 > /sys/kernel/debug/gpio-sim/${CHIP_LABEL}/line0/value
 ```
 
-Expected result: if bit 0 was previously low, both counters increment by 1.
-
-Drop a whole bank write:
+Verify the AUT can read the injected value using `gpioget` (libgpiod ≥ 1.6):
 
 ```sh
-echo 0x00 > /sys/kernel/virtrtlab/devices/gpio0/direction
+gpioget --chip $CHIP 0
+# Expected output: 1
+```
+
+Enable drop-all and verify transitions are suppressed:
+
+```sh
 echo 1000000 > /sys/kernel/virtrtlab/devices/gpio0/drop_rate_ppm
-echo 0x55 > /sys/kernel/virtrtlab/devices/gpio0/value
-cat /sys/kernel/virtrtlab/devices/gpio0/value
+echo 1 > /sys/kernel/debug/gpio-sim/virtrtlab-gpio0/line0/value
+gpioget --chip $CHIP 0
+# Expected output: 0  (line state unchanged)
 cat /sys/kernel/virtrtlab/devices/gpio0/stats/drops
+# Expected output: 1
 ```
 
-Expected result: `value` remains unchanged and `stats/drops` increments by 1.
-
-Observe AUT-driven output bits while still driving an input bit from sysfs:
+Verify edge event delivery with latency:
 
 ```sh
-echo 0x0F > /sys/kernel/virtrtlab/devices/gpio0/direction
-echo 0x80 > /sys/kernel/virtrtlab/devices/gpio0/value
-cat /sys/kernel/virtrtlab/devices/gpio0/value
+echo 5000000 > /sys/kernel/virtrtlab/devices/gpio0/latency_ns  # 5 ms
+gpionotify --chip $CHIP --rising-edge 0 &
+NOTIFY_PID=$!
+echo 1 > /sys/kernel/debug/gpio-sim/virtrtlab-gpio0/line0/value
+# Edge event arrives ~5 ms after the write above
+wait $NOTIFY_PID
+cat /sys/kernel/virtrtlab/devices/gpio0/stats/edge_events
+# Expected output: 1
 ```
 
-Expected result: bits 0..3 reflect the AUT-driven output state, and only bit 7 may be changed by the sysfs write.
+### Open questions
+
+> **Open 1:** Stable harness injection surface — should VirtRTLab expose a `value` or
+> `inject` sysfs attr that wraps the gpio-sim debugfs write, for harness script
+> compatibility with v0.1.0?
+
+> **Open 2:** Shim hook feasibility — is the fault-injection notification hook
+> implementable via public gpiolib APIs, or does it require in-tree modification to
+> `gpio-sim.c`?
+
+> **Open 3:** Stable `/dev` path — `chip_path` sysfs attr vs. udev symlink at
+> `/dev/virtrtlab-gpioN`.
+
+> **Open 4:** `bus state=down` semantics for GPIO — block injection or pass-through?
+
+> **Open 5:** `num_lines` configurability — module parameter, per-bank sysfs attr, or
+> fixed at 8.
+
+> **Open 6:** `active_low` read-back — should VirtRTLab expose a read-only per-line
+> `active_low` attr derived from the AUT's ioctl flags, to help harness scripts compute
+> the correct injection value?
 
 ## Rationale
 
@@ -253,11 +412,11 @@ The AUT configures the serial line via `tcsetattr()` — this is the standard PO
 **Why no `mode` or `fault_policy` in sysfs?**  
 Record/replay and named fault profiles are orchestration concepts. They are cleaner to implement in Python scripts that write individual sysfs attrs, rather than encoding policy state in the kernel. This keeps the kernel surface minimal and auditable.
 
-**Why an 8-bit bank instead of one device per line?**  
-An 8-bit bank is a pragmatic MVP shape: it matches common embedded register-style GPIO usage, keeps the sysfs surface compact, and allows simultaneous bit transitions without inventing a more complex userspace protocol.
+**Why retire the custom banked GPIO and adopt gpio-sim (v0.2.0)?**  
+The v0.1.0 custom gpiochip implementation provided no standard AUT interface: a userspace AUT using `libgpiod` or the GPIO v2 ioctl API could not interact with it. VirtRTLab's purpose is to simulate real hardware the AUT has been compiled against; a private sysfs-only bank model defeats this goal. `gpio-sim` is upstream, maintained, and provides both the char-device AUT interface and a debugfs harness injection surface, eliminating the need to re-implement gpiolib chip infrastructure.
 
-**Why use a `gpiolib` / Xilinx-style error model?**  
-For `v0.1.0`, VirtRTLab needs a simple GPIO contract that feels familiar to Linux driver authors and test engineers. A banked memory-mapped controller such as Xilinx AXI GPIO is representative for per-bit direction, bank value read/write, and edge-capable input lines. The spec therefore adopts that controller family as an inspiration for observable error cases, while intentionally excluding Linux legacy sysfs-export workflow details that do not match the VirtRTLab sysfs surface.
+**Why keep VirtRTLab sysfs for fault control rather than gpio-sim configfs (v0.2.0)?**  
+Fault injection parameters are dynamic: CI test scripts change them at runtime between cases. gpio-sim's configfs surface is a provisioning-time interface (used at chip creation), not a runtime control surface. VirtRTLab sysfs remains the correct layer for runtime harness control.
 
 ## Decisions
 
@@ -271,4 +430,8 @@ For `v0.1.0`, VirtRTLab needs a simple GPIO contract that feels familiar to Linu
 - After `rmmod`/`insmod`, the fault injection sequence is identical to the previous load if `seed` is not written — deterministic by default.
 - After `state=reset`, the next fault draw continues from wherever the PRNG left off. If test reproducibility requires a known sequence across resets, write `seed` explicitly after each `state=reset`.
 
-**GPIO bank width** — fixed at 8 bits in `v0.1.0`: each `gpioN` instance models exactly 8 logical lines. Wider banks or configurable bank widths are deferred.
+**GPIO line count** — default 8 lines per `gpioN` instance in v0.2.0. The exact configurability surface (module parameter vs. sysfs attr) is an open question (Open 5); `num_lines` is read-only in sysfs and reflects the value chosen at provisioning time.
+
+**GPIO transfer unit** — changed from bank-write (v0.1.0) to per-line-write (v0.2.0) to align with gpio-sim's per-line debugfs interface and the GPIO v2 API's per-line granularity. `drop_rate_ppm` and `bitflip_rate_ppm` are now evaluated independently for each line write.
+
+**`stats/bitflips` counter** — added in v0.2.0. In v0.1.0, bitflips were subsumed in `stats/value_changes`. Separating them allows test assertions to distinguish intended transitions (AUT response to correct injection) from corruption events (bitflip gate fired).
