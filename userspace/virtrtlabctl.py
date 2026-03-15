@@ -5,6 +5,8 @@ import argparse
 import json
 import subprocess
 import sys
+import tomllib
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -14,6 +16,12 @@ SYSFS_ROOT = "/sys/kernel/virtrtlab"
 RUN_DIR = "/run/virtrtlab"
 DAEMON_BIN = "virtrtlabd"
 KNOWN_MODULES = ["virtrtlab_core", "virtrtlab_uart", "virtrtlab_gpio"]
+
+# type → (ko filename, insmod parameter name)
+MODULE_MAP: dict[str, tuple[str, str]] = {
+    "uart": ("virtrtlab_uart.ko", "num_uarts"),
+    "gpio": ("virtrtlab_gpio.ko", "num_gpio"),
+}
 
 # ---------------------------------------------------------------------------
 # Error class
@@ -68,6 +76,100 @@ def _emit(data: "dict | list | str", json_flag: bool) -> None:
         else:
             for k, v in data.items():
                 print(f"{k}: {v}")
+
+
+# ---------------------------------------------------------------------------
+# Lab profile
+# ---------------------------------------------------------------------------
+
+
+def _find_ko(module_name: str, module_dir: str | None = None) -> Path:
+    """Return path to <module_name>.ko; raise VirtrtlabError(1) if not found.
+
+    Search order: module_dir (if given) → ./ → /lib/modules/$(uname -r)/
+    """
+    filename = f"{module_name}.ko"
+    candidates: list[Path] = []
+    if module_dir:
+        candidates.append(Path(module_dir) / filename)
+    candidates.append(Path(".") / filename)
+    try:
+        uname_r = subprocess.check_output(["uname", "-r"], text=True).strip()
+        candidates.append(Path(f"/lib/modules/{uname_r}") / filename)
+    except subprocess.SubprocessError:
+        pass
+    for path in candidates:
+        if path.exists():
+            return path
+    searched = ", ".join(str(p) for p in candidates)
+    raise VirtrtlabError(f"{filename} not found (searched: {searched})", exit_code=1)
+
+
+def _resolve_profile(args: argparse.Namespace) -> dict:
+    """Resolve a lab profile from TOML file + inline overrides.
+
+    Returns: {'devices': [{'type': str, 'count': int}, ...],
+               'bus':     {...},
+               'build':   {'module_dir': str | None, ...}}
+    Raises VirtrtlabError(2) on parse/validation errors.
+    """
+    profile: dict = {"devices": [], "bus": {}, "build": {}}
+
+    # Locate TOML file
+    toml_path: Path | None = None
+    if getattr(args, "config", None):
+        toml_path = Path(args.config)
+        if not toml_path.exists():
+            raise VirtrtlabError(f"config file not found: {toml_path}", exit_code=2)
+    else:
+        for candidate in (Path("lab.toml"), Path("/etc/virtrtlab/lab.toml")):
+            if candidate.exists():
+                toml_path = candidate
+                break
+
+    if toml_path is not None:
+        with open(toml_path, "rb") as fh:
+            try:
+                data = tomllib.load(fh)
+            except tomllib.TOMLDecodeError as exc:
+                raise VirtrtlabError(f"profile parse error: {exc}", exit_code=2) from exc
+        profile["build"] = data.get("build", {})
+        profile["bus"] = data.get("bus", {})
+        profile["devices"] = [
+            {"type": d["type"], "count": int(d.get("count", 1))}
+            for d in data.get("devices", [])
+        ]
+
+    # Apply inline overrides (--uart N, --gpio N); they override matching entries
+    inline: dict[str, int] = {}
+    if getattr(args, "uart", None) is not None:
+        inline["uart"] = args.uart
+    if getattr(args, "gpio", None) is not None:
+        inline["gpio"] = args.gpio
+
+    if inline:
+        by_type = {d["type"]: i for i, d in enumerate(profile["devices"])}
+        for dev_type, count in inline.items():
+            if dev_type in by_type:
+                profile["devices"][by_type[dev_type]]["count"] = count
+            else:
+                profile["devices"].append({"type": dev_type, "count": count})
+
+    if not profile["devices"]:
+        raise VirtrtlabError(
+            "no lab profile found (searched: ./lab.toml, /etc/virtrtlab/lab.toml);"
+            " pass --config <file> or use --uart/--gpio inline flags",
+            exit_code=2,
+        )
+
+    # Validate device types
+    for dev in profile["devices"]:
+        if dev["type"] not in MODULE_MAP:
+            raise VirtrtlabError(
+                f"unknown device type: {dev['type']}", exit_code=2
+            )
+
+    return profile
 
 
 # ---------------------------------------------------------------------------
