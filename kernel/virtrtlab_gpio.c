@@ -658,13 +658,16 @@ static void virtrtlab_gpio_apply(struct virtrtlab_gpio_dev *gdev)
 		/*
 		 * Spec: "one PRNG draw per bitflip decision".
 		 *
-		 * A single u32 draw is split into two independent fields:
+		 * A single u32 draw is split into two subfields (correlated,
+		 * not statistically independent):
 		 *   gate:      (rnd % 1000000U) < bitflip_ppm
-		 *              Uniform in [0, 999 999]; gives exactly the
-		 *              requested ppm probability with no bias.
+		 *              Approximately uniform in [0, 999 999].
+		 *              2^32 is not a multiple of 1 000 000, so there
+		 *              is a small modulo bias (~0.007%); negligible
+		 *              for fault simulation purposes.
 		 *   bit index: (rnd / 1000000U) % hweight8(input_mask)
-		 *              Quotient lies in [0, 4294]; bias from the
-		 *              modulo is negligible for up to 8 active lines.
+		 *              Quotient lies in [0, 4294]; residual bias is
+		 *              negligible for up to 8 active lines.
 		 */
 		u32 rnd    = virtrtlab_bus_next_prng_u32();
 		u8 m       = input_mask;

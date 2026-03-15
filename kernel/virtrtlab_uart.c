@@ -72,7 +72,7 @@
 #define VIRTRTLAB_UART_BURST_SZ		64U
 
 /*
- * tty_std_termios defaults reflected before any AUT open (or after bus reset).
+ * tty_std_termios defaults reflected at device creation (module load).
  * baud=38400 matches tty_std_termios speed B38400.
  */
 #define VIRTRTLAB_UART_DEFAULT_BAUD	38400U
@@ -97,7 +97,8 @@ struct virtrtlab_uart_dev {
 	/*
 	 * UART termios mirrors — read-only via sysfs; written by the TTY
 	 * driver (issue #2).  Initialised to tty_std_termios defaults on
-	 * module load and after a bus reset.
+	 * module load / device creation; subsequent updates reflect AUT
+	 * tcsetattr() calls and are not implicitly reset by bus RESET.
 	 */
 	u32			baud;		/* 0 if AUT sets unsupported B0/Bx */
 	char			parity[8];	/* "none" | "even" | "odd" */
@@ -133,9 +134,9 @@ struct virtrtlab_uart_dev {
 	spinlock_t		tx_lock;	/* protects tx_fifo */
 
 	/*
-	 * issue #2-A4: RX kfifo — wire → AUT (power-of-two).
-	 *   Overflow evicts the new bytes and increments stat_overruns
-	 *   (handled in wire_write()).
+	 * issue #2-A4: wire-side kfifo — AUT → wire (power-of-two).
+	 *   Filled by virtrtlab_uart_tx_work_fn(), drained by wire_read().
+	 *   Overflow evicts the new bytes and increments stat_overruns.
 	 */
 	DECLARE_KFIFO_PTR(rx_fifo, u8);
 	spinlock_t		rx_lock;	/* protects rx_fifo */
@@ -158,7 +159,7 @@ struct virtrtlab_uart_dev {
 	 */
 	atomic64_t		stat_tx_bytes;	/* counted before fault injection */
 	atomic64_t		stat_rx_bytes;
-	atomic64_t		stat_overruns;	/* RX buffer evictions */
+	atomic64_t		stat_overruns;	/* wire-side fifo overruns (rx_fifo evictions) */
 	atomic64_t		stat_drops;	/* fault-injected or state=down drops */
 
 	/*
@@ -763,11 +764,20 @@ static ssize_t virtrtlab_tty_write(struct tty_struct *tty, const u8 *buf,
 	if (!virtrtlab_bus_is_up())
 		return -EIO;
 
+	/*
+	 * Per-device gate: reject when disabled.  Read enabled and baud
+	 * together under lock to avoid a second lock acquisition below.
+	 */
+	mutex_lock(&udev->lock);
+	if (!udev->enabled) {
+		mutex_unlock(&udev->lock);
+		return -EIO;
+	}
+	baud = udev->baud;
+	mutex_unlock(&udev->lock);
+
 	copied = kfifo_in_spinlocked(&udev->tx_fifo, buf, count, &udev->tx_lock);
 	if (copied) {
-		mutex_lock(&udev->lock);
-		baud = udev->baud;
-		mutex_unlock(&udev->lock);
 		/*
 		 * hrtimer_start() on an already-active timer is safe: the
 		 * timer is rearmed with the new expiry.  Skipping the
@@ -963,10 +973,27 @@ static ssize_t virtrtlab_wire_read(struct file *filp, char __user *buf,
 	unsigned long flags;
 	int ret;
 
+	/* POSIX: zero-length read must return 0 immediately without blocking. */
+	if (!count)
+		return 0;
+
 	/* Return EOF when a bus reset is pending; simulator must re-open. */
 	if (atomic_read(&udev->wire_reset_pending))
 		return 0;
 
+	/*
+	 * Cap to PAGE_SIZE so the allocation stays in the small-object
+	 * slab and the call cannot block arbitrarily long under rx_lock
+	 * (m1 fix: removes the old hard 256-byte ceiling).
+	 * Allocate once here so that the retry loop below does not
+	 * reallocate on spurious wakeups.
+	 */
+	rd_sz = min_t(size_t, count, PAGE_SIZE);
+	kbuf = kmalloc(rd_sz, GFP_KERNEL);
+	if (!kbuf)
+		return -ENOMEM;
+
+retry:
 	if (!(filp->f_flags & O_NONBLOCK)) {
 		/*
 		 * !kfifo_is_empty() evaluated without lock is a hint only;
@@ -976,21 +1003,15 @@ static ssize_t virtrtlab_wire_read(struct file *filp, char __user *buf,
 					       !kfifo_is_empty(&udev->rx_fifo) ||
 					       !atomic_read(&udev->port_active) ||
 					       atomic_read(&udev->wire_reset_pending));
-		if (ret)
+		if (ret) {
+			kfree(kbuf);
 			return ret;
-		if (atomic_read(&udev->wire_reset_pending))
+		}
+		if (atomic_read(&udev->wire_reset_pending)) {
+			kfree(kbuf);
 			return 0;
+		}
 	}
-
-	/*
-	 * Cap to PAGE_SIZE so the allocation stays in the small-object
-	 * slab and the call cannot block arbitrarily long under rx_lock
-	 * (m1 fix: removes the old hard 256-byte ceiling).
-	 */
-	rd_sz = min_t(size_t, count, PAGE_SIZE);
-	kbuf = kmalloc(rd_sz, GFP_KERNEL);
-	if (!kbuf)
-		return -ENOMEM;
 
 	/*
 	 * Acquire rx_lock before touching rx_fifo.  port_shutdown() clears
@@ -1008,8 +1029,13 @@ static ssize_t virtrtlab_wire_read(struct file *filp, char __user *buf,
 	spin_unlock_irqrestore(&udev->rx_lock, flags);
 
 	if (!n) {
-		kfree(kbuf);
-		return -EAGAIN;	/* empty (non-blocking or spurious wakeup) */
+		/* Non-blocking fd: surface EAGAIN when fifo is empty. */
+		if (filp->f_flags & O_NONBLOCK) {
+			kfree(kbuf);
+			return -EAGAIN;
+		}
+		/* Blocking fd: spurious wakeup or competing reader — re-wait. */
+		goto retry;
 	}
 
 	ret = copy_to_user(buf, kbuf, n) ? -EFAULT : (ssize_t)n;
@@ -1024,6 +1050,10 @@ static ssize_t virtrtlab_wire_write(struct file *filp, const char __user *buf,
 	u8 kbuf[256];
 	size_t chunk, done = 0;
 	int n;
+
+	/* POSIX: zero-length write must return 0. */
+	if (!count)
+		return 0;
 
 	while (done < count) {
 		chunk = min(count - done, sizeof(kbuf));
@@ -1049,18 +1079,31 @@ static ssize_t virtrtlab_wire_write(struct file *filp, const char __user *buf,
 	if (done)
 		tty_flip_buffer_push(&udev->port);
 
+	/*
+	 * The write path is non-blocking with respect to flip buffer pressure:
+	 * tty_insert_flip_string() never sleeps.  When the flip buffer is full
+	 * and no bytes were written, return -EAGAIN regardless of O_NONBLOCK so
+	 * the simulator can detect back-pressure and retry (or use poll()).
+	 */
 	return done ? (ssize_t)done : -EAGAIN;
 }
 
 static __poll_t virtrtlab_wire_poll(struct file *filp, poll_table *wait)
 {
 	struct virtrtlab_uart_dev *udev = filp->private_data;
-	__poll_t mask = EPOLLOUT | EPOLLWRNORM; /* write always ready */
+	__poll_t mask = 0;
 
 	poll_wait(filp, &udev->wire_read_wq, wait);
 
 	if (!kfifo_is_empty(&udev->rx_fifo))
 		mask |= EPOLLIN | EPOLLRDNORM;
+	/*
+	 * Only signal writability when the port is active: wire_write() returns
+	 * -EAGAIN when port_active is 0, so advertising EPOLLOUT then would
+	 * cause poll/epoll callers to busy-loop.
+	 */
+	if (atomic_read(&udev->port_active))
+		mask |= EPOLLOUT | EPOLLWRNORM;
 	if (atomic_read(&udev->wire_reset_pending) ||
 	    !atomic_read(&udev->port_active))
 		mask |= EPOLLHUP;
