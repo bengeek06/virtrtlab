@@ -9,14 +9,10 @@ Acceptance criteria covered:
 import os
 import stat
 import subprocess
-import time
 
 import pytest
 
-from conftest import DAEMON_BIN, RUN_DIR
-
-
-SOCK_PATH = f"{RUN_DIR}/uart0.sock"
+from conftest import DAEMON_BIN, RUN_DIR, SOCK_PATH
 
 
 # ---------------------------------------------------------------------------

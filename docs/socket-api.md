@@ -60,8 +60,9 @@ Each UART instance N owns:
 | State | Active fds monitored by epoll | Transition |
 |---|---|---|
 | `WAIT_CLIENT` | `server_fd` (EPOLLIN) | `accept()` succeeds → `RELAYING` |
-| `RELAYING` | `wire_fd` (EPOLLIN), `client_fd` (EPOLLIN) | client EOF → `DRAINING`; wire EOF → reopen wire → `WAIT_CLIENT` |
-| `DRAINING` | `wire_fd` (EPOLLIN, `O_NONBLOCK`) | `EAGAIN` or `EIO` or wire EOF → `WAIT_CLIENT` |
+| `RELAYING` | `wire_fd` (EPOLLIN), `client_fd` (EPOLLIN) | client EOF → drain inline → `WAIT_CLIENT`; wire EOF → reopen wire → `WAIT_CLIENT` |
+
+On simulator disconnect, stale wire bytes are drained **inline** (not via a separate epoll state): `wire_fd` is set `O_NONBLOCK` and read in a loop until `EAGAIN`/`EIO`/EOF, then flags are restored before re-entering `WAIT_CLIENT`. An epoll-driven `DRAINING` state was considered but rejected: `EPOLLIN` never fires on an empty wire device when the AUT is silent, causing an indefinite wait. The inline drain is bounded by the kernel ring buffer (~4 KB).
 
 ### epoll loop
 
@@ -81,10 +82,14 @@ The main loop is:
 ```c
 epoll_fd = epoll_create1(EPOLL_CLOEXEC);
 
+/* Register the signal fd once, outside the per-instance loop. */
+epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sig_fd, &ev_signal);
+
 /* For each instance N at startup: */
-epoll_ctl(epoll_fd, EPOLL_CTL_ADD, inst->wire_fd,   &ev_wire);
-epoll_ctl(epoll_fd, EPOLL_CTL_ADD, inst->server_fd, &ev_server);
-epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sig_fd,          &ev_signal);
+for (int n = 0; n < num_uarts; n++) {
+    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, inst[n].server_fd, &ev_server);
+    /* wire_fd is NOT added here: only server_fd is watched in WAIT_CLIENT. */
+}
 
 for (;;) {
     n = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
@@ -141,26 +146,29 @@ n > 0                 → write(client_fd, wire_buf, n)     /* forward to simula
 ```
 n = recv(client_fd, sock_buf, sizeof sock_buf, 0)
 n == 0  → close(client_fd); client_fd = -1
-           fcntl(wire_fd, F_SETFL, O_RDWR | O_NONBLOCK)
-           epoll: remove client_fd → DRAINING
+           inline drain (see above) → WAIT_CLIENT
 n > 0   → write(wire_fd, sock_buf, n)
            /* EAGAIN: RX buffer full → byte lost, stat_overruns incremented by kernel */
 ```
 
-**DRAINING — `wire_fd` readable, non-blocking**
+**Inline drain on simulator disconnect**
 
-On simulator disconnect, the daemon discards stale AUT→daemon bytes so the next simulator starts from a clean stream. `wire_fd` stays open throughout to preserve bus state change notifications.
+On simulator disconnect, the daemon discards stale AUT→daemon bytes so the next simulator starts from a clean stream. `wire_fd` stays open throughout to preserve bus state change notifications. The drain is done inline (not via a separate epoll state) using `O_NONBLOCK`:
 
 ```
-n = read(wire_fd, wire_buf, sizeof wire_buf)
-n < 0, errno == EAGAIN  → fcntl(wire_fd, F_SETFL, O_RDWR)  /* drain complete */
-                           epoll: add server_fd → WAIT_CLIENT
-n < 0, errno == EIO     → drain stops (bus went down)
-                           fcntl(wire_fd, F_SETFL, O_RDWR)
-                           → WAIT_CLIENT
-n == 0                  → close(wire_fd); wire_fd = reopen  /* state=reset during drain */
-                           → WAIT_CLIENT
-n > 0                   → discard silently, continue draining
+fl = fcntl(wire_fd, F_GETFL, 0)
+fcntl(wire_fd, F_SETFL, fl | O_NONBLOCK)   /* set non-blocking for drain */
+
+loop:
+    n = read(wire_fd, wire_buf, sizeof wire_buf)
+    n > 0                   → discard silently, continue
+    n == 0                  → close(wire_fd); wire_fd = reopen  /* state=reset during drain */
+                               break
+    n < 0, errno == EAGAIN  → drain complete; break
+    n < 0, errno == EIO     → drain stops (bus went down); break
+
+fcntl(wire_fd, F_SETFL, fl)   /* restore original flags */
+→ WAIT_CLIENT
 ```
 
 ## Testing

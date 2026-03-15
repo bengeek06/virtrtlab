@@ -103,14 +103,36 @@ static int parse_args(int argc, char *argv[],
 
 /*
  * mkdir_rundir - create the socket directory if it does not exist.
- * EEXIST is not an error; the directory may survive a daemon restart.
+ *
+ * Mode 0755: non-root simulators must be able to traverse the directory
+ * and connect to the AF_UNIX sockets inside it.
+ *
+ * On EEXIST, stat() the path to ensure it is actually a directory; a
+ * regular file or symlink at that path would cause confusing failures
+ * later when bind() tries to create sockets there.
  */
 static int mkdir_rundir(const char *path)
 {
-	if (mkdir(path, 0700) < 0 && errno != EEXIST) {
-		fprintf(stderr, "virtrtlabd: mkdir %s: %s\n",
-			path, strerror(errno));
-		return -1;
+	struct stat st;
+
+	if (mkdir(path, 0755) < 0) {
+		if (errno != EEXIST) {
+			fprintf(stderr, "virtrtlabd: mkdir %s: %s\n",
+				path, strerror(errno));
+			return -1;
+		}
+		/* Path already exists — verify it is a directory. */
+		if (stat(path, &st) < 0) {
+			fprintf(stderr, "virtrtlabd: stat %s: %s\n",
+				path, strerror(errno));
+			return -1;
+		}
+		if (!S_ISDIR(st.st_mode)) {
+			fprintf(stderr,
+				"virtrtlabd: %s exists but is not a directory\n",
+				path);
+			return -1;
+		}
 	}
 	return 0;
 }

@@ -123,6 +123,17 @@ int uart_instance_init(struct uart_instance *inst, int idx,
 
 	memset(&addr, 0, sizeof(addr));
 	addr.sun_family = AF_UNIX;
+	/*
+	 * Validate that sock_path fits in sun_path before binding.
+	 * A silently truncated path would bind to the wrong socket and
+	 * make unlink() in destroy() miss the real file.
+	 */
+	if (strlen(inst->sock_path) >= sizeof(addr.sun_path)) {
+		fprintf(stderr,
+			"virtrtlabd: uart%d: socket path too long (max %zu): %s\n",
+			inst->idx, sizeof(addr.sun_path) - 1, inst->sock_path);
+		goto err_server;
+	}
 	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", inst->sock_path);
 
 	if (bind(inst->server_fd,
@@ -254,6 +265,14 @@ void on_server_readable(struct uart_instance *inst, int epoll_fd)
 {
 	int fd;
 
+	/*
+	 * State guard: a single epoll_wait batch can deliver events for fds
+	 * that were removed mid-batch by an earlier event in the same call.
+	 * If we are no longer in WAIT_CLIENT, discard this stale event.
+	 */
+	if (inst->state != WAIT_CLIENT)
+		return;
+
 	fd = accept4(inst->server_fd, NULL, NULL, SOCK_CLOEXEC);
 	if (fd < 0) {
 		perror("accept4");
@@ -282,6 +301,10 @@ void on_wire_readable(struct uart_instance *inst, int epoll_fd)
 {
 	ssize_t n;
 	ssize_t nw;
+
+	/* State guard: discard stale event delivered after a same-batch transition. */
+	if (inst->state != RELAYING)
+		return;
 
 	n = read(inst->wire_fd, inst->wire_buf, sizeof(inst->wire_buf));
 
@@ -346,6 +369,10 @@ void on_wire_readable(struct uart_instance *inst, int epoll_fd)
 void on_client_readable(struct uart_instance *inst, int epoll_fd)
 {
 	ssize_t n;
+
+	/* State guard: discard stale event delivered after a same-batch transition. */
+	if (inst->state != RELAYING)
+		return;
 
 	n = recv(inst->client_fd, inst->sock_buf, sizeof(inst->sock_buf), 0);
 
