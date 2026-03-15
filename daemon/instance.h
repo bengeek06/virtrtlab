@@ -8,9 +8,9 @@
  *   client_fd : connected simulator (-1 if none)
  *
  * State machine:
- *   WAIT_CLIENT → (accept)       → RELAYING
- *   RELAYING    → (client close) → DRAINING → WAIT_CLIENT
- *   RELAYING    → (wire EOF)     → reopen wire → WAIT_CLIENT
+ *   WAIT_CLIENT → (accept)            → RELAYING
+ *   RELAYING    → (client disconnect) → drain wire inline → WAIT_CLIENT
+ *   RELAYING    → (wire EOF)          → reopen wire      → WAIT_CLIENT
  */
 
 #ifndef VIRTRTLAB_INSTANCE_H
@@ -18,13 +18,12 @@
 
 #define WIRE_BUF_SIZE   4096
 #define SOCK_BUF_SIZE   4096
-#define SOCK_PATH_MAX     64
+#define SOCK_PATH_MAX    108  /* sizeof(struct sockaddr_un.sun_path) */
 #define WIRE_PATH_MAX     64
 
 enum inst_state {
 	WAIT_CLIENT,
 	RELAYING,
-	DRAINING,
 };
 
 enum fd_role {

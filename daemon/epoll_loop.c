@@ -51,8 +51,10 @@ void epoll_loop_add(int epoll_fd, int fd, uint32_t events, struct evt_ctx *ctx)
 	ev.events   = events;
 	ev.data.ptr = ctx;
 
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) < 0)
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) < 0) {
 		perror("epoll_ctl ADD");
+		abort(); /* M2: unrecoverable — fd would not be monitored */
+	}
 }
 
 void epoll_loop_del(int epoll_fd, int fd)
@@ -67,18 +69,6 @@ void epoll_loop_del(int epoll_fd, int fd)
 		if (errno != ENOENT && errno != EBADF)
 			perror("epoll_ctl DEL");
 	}
-}
-
-void epoll_loop_mod(int epoll_fd, int fd, uint32_t events, struct evt_ctx *ctx)
-{
-	struct epoll_event ev;
-
-	memset(&ev, 0, sizeof(ev));
-	ev.events   = events;
-	ev.data.ptr = ctx;
-
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &ev) < 0)
-		perror("epoll_ctl MOD");
 }
 
 /* ---- Instance registry --------------------------------------------------- */
@@ -128,7 +118,26 @@ static void on_signal(int sig_fd)
  */
 static void dispatch(struct evt_ctx *ctx, uint32_t events, int epoll_fd)
 {
-	(void)events; /* all monitored fds use EPOLLIN; no need to check */
+	/*
+	 * B2: Check for error/hangup before routing to a role handler.
+	 * EPOLLHUP fires on peer close (normal for AF_UNIX clients),
+	 * EPOLLERR signals an unexpected fault on the fd.  Route to the
+	 * normal read handler in both cases: read/recv will return 0 or -1
+	 * and the handler will transition the state machine cleanly.
+	 * If EPOLLIN is also set we fall through to the switch as normal.
+	 */
+	if ((events & (EPOLLHUP | EPOLLERR)) && !(events & EPOLLIN)) {
+		switch (ctx->role) {
+		case ROLE_CLIENT:
+			on_client_readable(ctx->inst, epoll_fd);
+			return;
+		case ROLE_WIRE:
+			on_wire_readable(ctx->inst, epoll_fd);
+			return;
+		default:
+			break; /* server/signal errors fall through */
+		}
+	}
 
 	switch (ctx->role) {
 	case ROLE_SERVER:

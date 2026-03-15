@@ -64,8 +64,9 @@ static struct option longopts[] = {
 static int parse_args(int argc, char *argv[],
 		      int *num_uarts, const char **run_dir)
 {
-	int opt;
-	int n;
+	int   opt;
+	int   n;
+	char *endptr;
 
 	*num_uarts = DEFAULT_UARTS;
 	*run_dir   = DEFAULT_RUNDIR;
@@ -73,8 +74,9 @@ static int parse_args(int argc, char *argv[],
 	while ((opt = getopt_long(argc, argv, "n:d:h", longopts, NULL)) != -1) {
 		switch (opt) {
 		case 'n':
-			n = atoi(optarg);
-			if (n < 1 || n > MAX_UARTS) {
+			n = (int)strtol(optarg, &endptr, 10);
+			if (*endptr != '\0' || endptr == optarg ||
+			    n < 1 || n > MAX_UARTS) {
 				fprintf(stderr,
 					"virtrtlabd: --num-uarts must be 1..%d\n",
 					MAX_UARTS);
@@ -158,6 +160,12 @@ int main(int argc, char *argv[])
 
 	if (parse_args(argc, argv, &num_uarts, &run_dir) < 0)
 		return EXIT_FAILURE;
+
+	/*
+	 * Ignore SIGPIPE globally: write/send to a closed socket returns
+	 * EPIPE instead of killing the process.  Handlers check errno.
+	 */
+	signal(SIGPIPE, SIG_IGN);
 
 	if (mkdir_rundir(run_dir) < 0)
 		return EXIT_FAILURE;

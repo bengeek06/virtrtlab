@@ -5,12 +5,17 @@
  * State machine per uart_instance:
  *   WAIT_CLIENT : server_fd in epoll; wire_fd open but not monitored.
  *   RELAYING    : wire_fd + client_fd in epoll; server_fd removed.
- *   DRAINING    : wire_fd in epoll (O_NONBLOCK); client_fd closed.
  *
  * epoll registration summary:
  *   WAIT_CLIENT  → server_fd(EPOLLIN)
  *   RELAYING     → wire_fd(EPOLLIN) + client_fd(EPOLLIN)
- *   DRAINING     → wire_fd(EPOLLIN, O_NONBLOCK on the fd itself)
+ *
+ * On simulator disconnect, stale wire bytes are drained inline with
+ * O_NONBLOCK before re-entering WAIT_CLIENT.  An epoll-driven DRAINING
+ * state was considered but rejected: it deadlocks when the AUT has
+ * produced no data (EPOLLIN never fires on an empty wire device).
+ * The inline drain is bounded by the kernel ring buffer and completes
+ * in O(buffer_size / read_size) iterations.
  *
  * Closing an fd removes it from all epoll instances automatically
  * (Linux ≥ 2.6.9), so uart_instance_destroy() needs no explicit del.
@@ -46,8 +51,8 @@ static int wire_open(struct uart_instance *inst)
 /*
  * wire_reopen - deregister current wire_fd from epoll, close it, open fresh.
  *
- * Must only be called when wire_fd is registered in epoll (RELAYING or
- * DRAINING).  The new fd is NOT added to epoll — the caller decides when.
+ * Must only be called when wire_fd is registered in epoll (RELAYING state).
+ * The new fd is NOT added to epoll — the caller decides when.
  * Returns new fd (stored in inst->wire_fd), or -1 on error.
  */
 static int wire_reopen(struct uart_instance *inst, int epoll_fd)
@@ -118,7 +123,7 @@ int uart_instance_init(struct uart_instance *inst, int idx,
 
 	memset(&addr, 0, sizeof(addr));
 	addr.sun_family = AF_UNIX;
-	strncpy(addr.sun_path, inst->sock_path, sizeof(addr.sun_path) - 1);
+	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", inst->sock_path);
 
 	if (bind(inst->server_fd,
 		 (struct sockaddr *)&addr, sizeof(addr)) < 0) {
@@ -174,6 +179,69 @@ void uart_instance_destroy(struct uart_instance *inst, int epoll_fd)
 	}
 }
 
+/* ---- Disconnect + drain helper ------------------------------------------- */
+
+/*
+ * close_client_and_drain - disconnect the simulator and drain stale wire bytes
+ * before re-entering WAIT_CLIENT.
+ *
+ * Sequence:
+ *   1. Close client_fd (removes it from epoll).
+ *   2. Remove wire_fd from epoll.
+ *   3. Set O_NONBLOCK on wire_fd; drain the kernel ring buffer:
+ *        r > 0  — discard, continue
+ *        r == 0 — EOF (wire reset); reopen wire_fd
+ *        r < 0  — EAGAIN/EIO: drain complete
+ *   4. Restore original flags.
+ *   5. enter_wait_client().
+ *
+ * B3: if O_NONBLOCK cannot be set, drain is skipped to avoid blocking.
+ */
+static void close_client_and_drain(struct uart_instance *inst, int epoll_fd)
+{
+	int     fl_save;
+	ssize_t r;
+
+	client_close(inst, epoll_fd);
+	epoll_loop_del(epoll_fd, inst->wire_fd);
+
+	fl_save = fcntl(inst->wire_fd, F_GETFL, 0);
+	if (fl_save < 0 ||
+	    fcntl(inst->wire_fd, F_SETFL, fl_save | O_NONBLOCK) < 0) {
+		/* B3: cannot set O_NONBLOCK; skip drain to avoid blocking. */
+		perror("drain: fcntl O_NONBLOCK");
+		enter_wait_client(inst, epoll_fd);
+		return;
+	}
+
+	for (;;) {
+		r = read(inst->wire_fd, inst->wire_buf, sizeof(inst->wire_buf));
+		if (r > 0)
+			continue; /* discard stale bytes */
+		if (r == 0) {
+			/*
+			 * EOF: wire device was reset between simulator
+			 * disconnect and drain — reopen fresh.
+			 */
+			close(inst->wire_fd);
+			inst->wire_fd = wire_open(inst);
+			if (inst->wire_fd < 0)
+				return; /* wire lost; instance stays with no wire */
+			break; /* new fd needs no drain */
+		}
+		/* r < 0 */
+		if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EIO)
+			perror("drain wire");
+		break; /* EAGAIN / EIO: drain complete */
+	}
+
+	/* Restore original flags before re-entering WAIT_CLIENT. */
+	if (fcntl(inst->wire_fd, F_SETFL, fl_save) < 0)
+		perror("drain: restore fcntl");
+
+	enter_wait_client(inst, epoll_fd);
+}
+
 /* ---- epoll dispatch entry points ----------------------------------------- */
 
 /*
@@ -209,15 +277,11 @@ void on_server_readable(struct uart_instance *inst, int epoll_fd)
  *
  * Forwards bytes from the AUT to the simulator; handles EIO (state=down)
  * and EOF (state=reset).
- *
- * Note: DRAINING is no longer handled here.  On simulator disconnect,
- * on_client_readable() drains wire_fd inline in non-blocking mode so that
- * no data is required to trigger the epoll event (avoids the deadlock where
- * wire_fd has no data → EPOLLIN never fires → daemon stuck in DRAINING).
  */
 void on_wire_readable(struct uart_instance *inst, int epoll_fd)
 {
 	ssize_t n;
+	ssize_t nw;
 
 	n = read(inst->wire_fd, inst->wire_buf, sizeof(inst->wire_buf));
 
@@ -225,30 +289,54 @@ void on_wire_readable(struct uart_instance *inst, int epoll_fd)
 		if (errno == EIO) {
 			/*
 			 * state=down: bus halted, wire_fd still valid.
-			 * Back off 10 ms; epoll re-arms automatically.
+			 * Back off briefly; epoll re-arms automatically.
+			 * m3: usleep() stalls all instances — acceptable for
+			 * ≤ 8 UARTs at embedded baud rates.
 			 */
 			usleep(10000);
 			return;
 		}
-		perror("read wire (relaying)");
+		perror("read wire");
 		return;
 	}
 
 	if (n == 0) {
 		/*
-		 * EOF: state=reset has invalidated this wire_fd.
+		 * EOF: wire device was reset.
 		 * Reopen, disconnect simulator, wait for next client.
 		 */
-		if (wire_reopen(inst, epoll_fd) < 0)
+		if (wire_reopen(inst, epoll_fd) < 0) {
+			/* m1: wire device lost permanently — take instance offline. */
+			fprintf(stderr, "virtrtlabd: uart%d: wire lost, going offline\n",
+				inst->idx);
+			client_close(inst, epoll_fd);
+			uart_instance_destroy(inst, epoll_fd);
 			return;
+		}
 		client_close(inst, epoll_fd);
 		enter_wait_client(inst, epoll_fd);
 		return;
 	}
 
-	/* Forward AUT bytes to simulator. */
-	if (write(inst->client_fd, inst->wire_buf, (size_t)n) < 0)
-		perror("write client");
+	/*
+	 * Forward AUT bytes to simulator.
+	 * MSG_NOSIGNAL prevents SIGPIPE on a closed socket; we handle the
+	 * resulting EPIPE by disconnecting and draining.
+	 * A partial send means the simulator's receive buffer is full —
+	 * drop the client rather than silently losing data.
+	 */
+	nw = send(inst->client_fd, inst->wire_buf, (size_t)n, MSG_NOSIGNAL);
+	if (nw == (ssize_t)n)
+		return; /* fast path */
+
+	if (nw < 0) {
+		if (errno != EPIPE && errno != ECONNRESET)
+			perror("send client");
+	} else {
+		fprintf(stderr, "virtrtlabd: uart%d: partial send (%zd/%zd), dropping client\n",
+			inst->idx, nw, n);
+	}
+	close_client_and_drain(inst, epoll_fd);
 }
 
 /*
@@ -258,66 +346,19 @@ void on_wire_readable(struct uart_instance *inst, int epoll_fd)
 void on_client_readable(struct uart_instance *inst, int epoll_fd)
 {
 	ssize_t n;
-	ssize_t r;
-	int     fl;
 
 	n = recv(inst->client_fd, inst->sock_buf, sizeof(inst->sock_buf), 0);
 
 	if (n == 0) {
-		/*
-		 * Simulator disconnected.
-		 *
-		 * Close client_fd and remove wire_fd from epoll — bytes on
-		 * the wire device must be drained before the next simulator
-		 * connects, but epoll-driven DRAINING is unreliable when the
-		 * AUT has produced no data (wire_fd not readable → EPOLLIN
-		 * never fires → deadlock).  Drain inline instead.
-		 */
-		client_close(inst, epoll_fd);
-		epoll_loop_del(epoll_fd, inst->wire_fd);
-
-		fl = fcntl(inst->wire_fd, F_GETFL, 0);
-		if (fl >= 0 &&
-		    fcntl(inst->wire_fd, F_SETFL, fl | O_NONBLOCK) < 0)
-			perror("drain: fcntl O_NONBLOCK");
-
-		while (1) {
-			r = read(inst->wire_fd, inst->wire_buf,
-				 sizeof(inst->wire_buf));
-			if (r < 0) {
-				/* EAGAIN: all stale bytes consumed.
-				 * EIO:    bus went state=down; wire_fd valid.
-				 * Either way: drain complete. */
-				if (errno != EAGAIN && errno != EIO)
-					perror("drain wire");
-				break;
-			}
-			if (r == 0) {
-				/* state=reset: reopen wire device. */
-				close(inst->wire_fd);
-				inst->wire_fd = -1;
-				inst->wire_fd = wire_open(inst);
-				if (inst->wire_fd < 0)
-					return; /* cannot recover; skip */
-				/* New fd is not in epoll yet; enter_wait_client
-				 * will add server_fd; wire_fd added on next
-				 * on_server_readable(). */
-				goto wait_client;
-			}
-			/* r > 0: stale byte(s) — discard and continue. */
-		}
-
-		fl = fcntl(inst->wire_fd, F_GETFL, 0);
-		if (fl >= 0)
-			fcntl(inst->wire_fd, F_SETFL, fl & ~O_NONBLOCK);
-
-wait_client:
-		enter_wait_client(inst, epoll_fd);
+		/* Simulator disconnected cleanly. */
+		close_client_and_drain(inst, epoll_fd);
 		return;
 	}
 
 	if (n < 0) {
-		perror("recv client");
+		if (errno != ECONNRESET && errno != ENOTCONN)
+			perror("recv client");
+		close_client_and_drain(inst, epoll_fd);
 		return;
 	}
 

@@ -28,9 +28,6 @@ void epoll_loop_add(int epoll_fd, int fd, uint32_t events, struct evt_ctx *ctx);
 /* Deregister fd (safe to call on fds already removed or -1). */
 void epoll_loop_del(int epoll_fd, int fd);
 
-/* Modify the events mask of an already-registered fd. */
-void epoll_loop_mod(int epoll_fd, int fd, uint32_t events, struct evt_ctx *ctx);
-
 /* ----- Instance registry -------------------------------------------------- */
 
 /*
