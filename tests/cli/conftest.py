@@ -30,6 +30,7 @@ CLI_SCRIPT = os.path.join(CLI_DIR, "virtrtlabctl.py")
 KO = {
     "core": os.path.join(KERNEL_DIR, "virtrtlab_core.ko"),
     "uart": os.path.join(KERNEL_DIR, "virtrtlab_uart.ko"),
+    "gpio": os.path.join(KERNEL_DIR, "virtrtlab_gpio.ko"),
 }
 
 # ---------------------------------------------------------------------------
