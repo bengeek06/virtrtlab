@@ -2,12 +2,12 @@
 test_gpio_load.py — load/unload tests for virtrtlab_gpio.
 
 Validates:
-  - module loads with default param (1 bank)
+  - module loads with default param (1 device)
   - expected sysfs tree for gpio0 is created
   - dmesg messages appear on load and unload
   - sysfs tree is removed after unload
-  - module loads with num_gpio_banks=2 and creates gpio0 + gpio1
-  - invalid num_gpio_banks value is rejected (module refuses to load)
+  - module loads with num_gpio_devs=2 and creates gpio0 + gpio1
+  - invalid num_gpio_devs value is rejected (module refuses to load)
 """
 
 import os
@@ -33,22 +33,20 @@ DEVICES_ROOT = f"{SYSFS_ROOT}/devices"
 GPIO0_ATTRS = [
     "type",
     "bus",
+    "num_lines",
+    "chip_path",
+    "inject",
     "enabled",
     "latency_ns",
     "jitter_ns",
     "drop_rate_ppm",
     "bitflip_rate_ppm",
-    "direction",
-    "value",
-    "active_low",
-    "edge_rising",
-    "edge_falling",
 ]
 
 GPIO0_STATS_ATTRS = [
     "stats/value_changes",
-    "stats/edge_events",
     "stats/drops",
+    "stats/bitflips",
     "stats/reset",
 ]
 
@@ -63,7 +61,7 @@ def _gpio_path(bank, attr=""):
 # ---------------------------------------------------------------------------
 
 class TestGpioLoadDefault:
-    """virtrtlab_gpio default load: 1 bank."""
+    """virtrtlab_gpio default load: 1 device."""
 
     def test_module_loads(self, gpio_module):
         """insmod succeeds and module appears in /proc/modules."""
@@ -131,29 +129,32 @@ class TestGpioLoadDefault:
         with open(_gpio_path(0, "enabled")) as f:
             assert f.read().strip() == "1"
 
-    @pytest.mark.parametrize("attr,expected", [
-        ("direction",    "0x00"),
-        ("value",        "0x00"),
-        ("active_low",   "0x00"),
-        ("edge_rising",  "0x00"),
-        ("edge_falling", "0x00"),
-    ])
-    def test_sysfs_gpio0_mask_defaults(self, gpio_module, attr, expected):
-        """All mask attributes must default to 0x00."""
-        with open(_gpio_path(0, attr)) as f:
-            assert f.read().strip() == expected, \
-                f"{attr} default mismatch"
+    def test_sysfs_gpio0_num_lines(self, gpio_module):
+        """num_lines must read back '8'."""
+        with open(_gpio_path(0, "num_lines")) as f:
+            assert f.read().strip() == "8"
 
-    @pytest.mark.parametrize("stat", ["value_changes", "edge_events", "drops"])
+    def test_sysfs_gpio0_chip_path(self, gpio_module):
+        """chip_path must be a non-empty /dev/gpiochipN path that exists."""
+        with open(_gpio_path(0, "chip_path")) as f:
+            path = f.read().strip()
+        assert path.startswith("/dev/gpiochip"), (
+            f"chip_path does not look like a gpiochip device: {path!r}"
+        )
+        assert os.path.exists(path), (
+            f"chip_path '{path}' does not exist in /dev/"
+        )
+
+    @pytest.mark.parametrize("stat", ["value_changes", "drops", "bitflips"])
     def test_sysfs_gpio0_stats_default(self, gpio_module, stat):
         """All stats counters must default to 0."""
         with open(_gpio_path(0, f"stats/{stat}")) as f:
             assert f.read().strip() == "0"
 
-    def test_no_gpio1_with_single_bank(self, gpio_module):
-        """gpio1 must NOT exist when num_gpio_banks=1."""
+    def test_no_gpio1_with_single_device(self, gpio_module):
+        """gpio1 must NOT exist when num_gpio_devs=1."""
         assert not os.path.exists(_gpio_path(1)), \
-            "gpio1 dir unexpectedly present with num_gpio_banks=1"
+            "gpio1 dir unexpectedly present with num_gpio_devs=1"
 
 
 # ---------------------------------------------------------------------------
@@ -214,20 +215,20 @@ class TestGpioUnload:
 # ---------------------------------------------------------------------------
 
 class TestGpioMultiBank:
-    """virtrtlab_gpio with num_gpio_banks=2."""
+    """virtrtlab_gpio with num_gpio_devs=2."""
 
     def _load_two_banks(self):
         _rmmod("virtrtlab_gpio")
         _rmmod("virtrtlab_core")
         _insmod(KO["core"])
-        _insmod(KO["gpio"], "num_gpio_banks=2")
+        _insmod(KO["gpio"], "num_gpio_devs=2")
 
     def _unload_all(self):
         _rmmod("virtrtlab_gpio")
         _rmmod("virtrtlab_core")
 
     def test_two_banks_load(self):
-        """Both gpio0 and gpio1 dirs must exist with num_gpio_banks=2."""
+        """Both gpio0 and gpio1 dirs must exist with num_gpio_devs=2."""
         for ko in ("core", "gpio"):
             if not os.path.exists(KO[ko]):
                 pytest.skip(f"Module not built: {KO[ko]}")
@@ -236,7 +237,7 @@ class TestGpioMultiBank:
             assert os.path.isdir(_gpio_path(0)), "gpio0 dir missing"
             assert os.path.isdir(_gpio_path(1)), "gpio1 dir missing"
             assert not os.path.exists(_gpio_path(2)), \
-                "gpio2 unexpectedly present with num_gpio_banks=2"
+                "gpio2 unexpectedly present with num_gpio_devs=2"
         finally:
             self._unload_all()
 
@@ -278,7 +279,7 @@ class TestGpioMultiBank:
 # ---------------------------------------------------------------------------
 
 class TestGpioInvalidParam:
-    """virtrtlab_gpio refuses invalid num_gpio_banks values."""
+    """virtrtlab_gpio refuses invalid num_gpio_devs values."""
 
     def _try_load(self, params):
         """Attempt insmod; return True if it loaded, False if it was rejected."""
@@ -318,11 +319,11 @@ class TestGpioInvalidParam:
         return loaded
 
     @pytest.mark.parametrize("bad_param", [
-        "num_gpio_banks=0",
-        "num_gpio_banks=33",
+        "num_gpio_devs=0",
+        "num_gpio_devs=33",
     ])
     def test_rejects_out_of_range(self, bad_param):
-        """Module must refuse to load with out-of-range num_gpio_banks."""
+        """Module must refuse to load with out-of-range num_gpio_devs."""
         for ko in ("core", "gpio"):
             if not os.path.exists(KO[ko]):
                 pytest.skip(f"Module not built: {KO[ko]}")

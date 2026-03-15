@@ -129,43 +129,37 @@ Counters are reset by writing `0` to `stats/reset`. Counters wrap silently at `U
 
 ## Devices — GPIO (`gpio0`, `gpio1`, …)
 
-> **v0.2.0** — replaces the v0.1.0 custom banked GPIO model. `virtrtlab_gpio` now acts
-> as a fault-injection overlay on top of the Linux `gpio-sim` driver. The custom
-> `direction`, `value`, `active_low`, `edge_rising`, and `edge_falling` sysfs attrs are
-> **retired**. The AUT now communicates via the standard GPIO v2 character device API.
+> **v0.2.0** — replaces the v0.1.0 custom banked GPIO model. `virtrtlab_gpio` now
+> registers a native `gpio_chip` via `gpiochip_add_data()`, exposing `/dev/gpiochipN` to
+> the AUT. Fault injection is applied on the harness injection path via the `inject` sysfs
+> attr. The custom `direction`, `value`, `active_low`, `edge_rising`, and `edge_falling`
+> sysfs attrs are **retired**. No dependency on `gpio-sim` or any out-of-tree kernel patch.
 
 ### Overview
 
-`virtrtlab_gpio` is a **thin fault-injection shim** layered on top of the Linux
-`gpio-sim` driver (Linux ≥ 5.17, `CONFIG_GPIO_SIM`). `gpio-sim` creates a
-fully-standard gpiochip visible to the AUT via `/dev/gpiochipN`. VirtRTLab registers a
-shim on that chip's data path to intercept harness-injected line transitions and apply
-configurable fault injection (latency, jitter, drop, bitflip) before the transition
-reaches the AUT.
+`virtrtlab_gpio` registers a native `gpio_chip` via `gpiochip_add_data()` on module
+load. The chip is visible to the AUT via `/dev/gpiochipN` using the standard GPIO v2
+character device API. Fault injection (latency, jitter, drop, bitflip) is applied on
+every harness-injected input transition, before the new line state reaches the AUT.
 
 Two distinct control planes exist:
 
 - **AUT interface**: `/dev/gpiochipN` — standard GPIO v2 character device API
-- **Harness control plane**: `/sys/kernel/virtrtlab/devices/gpioN/` — fault attrs and
-  stats only (no direct line-state writes)
-- **Harness injection path**: gpio-sim debugfs — the harness drives input line state
-  here; VirtRTLab intercepts and applies fault injection
+- **Harness control plane**: `/sys/kernel/virtrtlab/devices/gpioN/` — `inject` attr for
+  line-state injection, fault attrs, and stats
 
 ### Device provisioning
 
-On module load, `virtrtlab_gpio` provisions one `gpio-sim` chip per `gpioN` instance.
-Each chip has `num_lines` lines (default: 8). The chip label in the gpiolib subsystem is
+On module load, `virtrtlab_gpio` calls `gpiochip_add_data()` once per `gpioN` instance.
+Each chip has 8 lines (fixed). The chip label in the gpiolib subsystem is
 `"virtrtlab-gpioN"` (e.g. `"virtrtlab-gpio0"` for the first instance).
 
-The gpiochip appears at `/dev/gpiochipN` where `N` is assigned dynamically by the kernel
-gpiolib. The mapping from VirtRTLab instance name to `/dev` path is exposed via the
-`chip_path` sysfs attr (see table below).
+The gpiochip index `N` is assigned dynamically by gpiolib; the resulting `/dev/gpiochipN`
+path is derived from `gc.base` and exposed via the `chip_path` sysfs attr so harness
+scripts can locate the correct device without scanning all gpiochips.
 
-`virtrtlab_gpio` declares `softdep: pre: gpio-sim`. Loading `virtrtlab_gpio.ko` when
-`gpio-sim` is absent returns `-ENODEV`; the module does not remain resident.
-
-> **Open 5:** Should `num_lines` be a per-bank sysfs attr settable before module load, a
-> module parameter, or fixed at 8?
+`virtrtlab_gpio` declares `softdep: pre: virtrtlab_core` only. No dependency on
+`gpio-sim` or any out-of-tree module.
 
 ### AUT interface
 
@@ -200,8 +194,9 @@ flags. VirtRTLab does not expose `direction`, `active_low`, or edge masks in sys
 |---|---|---|---|
 | `type` | ro | string | `"gpio"` |
 | `bus` | ro | string | Parent bus, e.g. `vrtlbus0` |
-| `num_lines` | ro | u8 | Number of lines provisioned in the gpio-sim chip (default: `8`) |
-| `chip_path` | ro | string | Absolute path to the AUT-facing character device, e.g. `/dev/gpiochip2`. Allows harness scripts to locate the correct `/dev` node without scanning all gpiochips. |
+| `num_lines` | ro | u8 | Number of lines on this chip. Fixed at `8` per instance in v0.2.0. |
+| `chip_path` | ro | string | Absolute path to the AUT-facing character device, e.g. `/dev/gpiochip2`. Derived from `gc.base` at `gpiochip_add_data()` time. |
+| `inject` | wo | string | `"N:V"` — inject value `V` (`0` or `1`) on input line `N` (`0`..`7`). Triggers the 7-step fault injection shim. Writes to AUT-owned output lines are silently ignored at commit time (step 6). `read()` returns `-EPERM`. |
 
 #### Fault attrs
 
@@ -217,39 +212,30 @@ Semantics identical to the common fault attrs defined above, adapted for GPIO:
 
 ### Harness injection path
 
-The harness drives **input lines** by writing to the gpio-sim debugfs interface:
+The harness drives **input lines** by writing to the `inject` sysfs attr:
 
 ```
-/sys/kernel/debug/gpio-sim/<chip-label>/<lineN>/value
+/sys/kernel/virtrtlab/devices/gpioN/inject
 ```
 
-where `<chip-label>` matches the `chip_path` attr basename (e.g.
-`/sys/kernel/debug/gpio-sim/virtrtlab-gpio0/`), and `<lineN>` is the debugfs line name
-assigned by gpio-sim (e.g. `line0`, `line1`, …, `line7`).
+Format: `"N:V"` where `N` is the zero-based line index (`0`..`7`) and `V` is the
+physical value (`0` or `1`). Both fields must be decimal integers; any other form returns
+`-EINVAL`.
 
-Write `0` for logical low, `1` for logical high. Values are in the **physical** domain:
-gpio-sim does not apply active-low inversion at the debugfs layer. The AUT's per-line
-active-low flag (set via `GPIO_V2_GET_LINE_IOCTL`) affects how the AUT reads the value,
-not how the harness writes it.
-
-> **Open 1:** Should VirtRTLab expose a `value` sysfs attr at
-> `/sys/kernel/virtrtlab/devices/gpioN/value` as a stable per-bank (or per-line) harness
-> injection surface that internally wraps the gpio-sim debugfs write? This would preserve
-> harness script compatibility with v0.1.0 and decouple harness scripts from the
-> debugfs path structure.
-
-> **Open 6:** Should VirtRTLab expose a read-only `active_low` attr derived from gpio-sim
-> internal state, so harness scripts can compute the correct physical injection value for a
-> given AUT-requested logical polarity?
+Values are in the **physical** domain: the AUT's per-line active-low flag (set via
+`GPIO_V2_GET_LINE_IOCTL`) affects how the AUT reads the value, not how the harness
+writes it. A harness writing `inject = "0:1"` injects a physical high on line 0; if the
+AUT requested that line with `GPIO_V2_LINE_FLAG_ACTIVE_LOW`, it reads the value as
+logical low.
 
 ### Fault injection shim — observable behaviour
 
-When the harness writes a value to a gpio-sim debugfs line file, the shim executes the
-following sequence before the new state reaches the AUT:
+When the harness writes to the `inject` attr, the shim executes the following sequence
+before the new state reaches the AUT:
 
 1. **Snapshot** — the shim captures the current `latency_ns`, `jitter_ns`,
-   `drop_rate_ppm`, `bitflip_rate_ppm`, and requested line value at the moment the debugfs
-   write is processed. Later sysfs writes to fault attrs do not retroactively modify a
+   `drop_rate_ppm`, `bitflip_rate_ppm`, and requested line value at the moment the `inject`
+   attr write is processed. Later sysfs writes to fault attrs do not retroactively modify a
    transition already in the shim pipeline.
 2. **`enabled` check** — if `enabled=0` the shim is bypassed: the written value is
    committed immediately to the AUT-facing line state, no fault evaluation occurs, no
@@ -275,16 +261,10 @@ following sequence before the new state reaches the AUT:
 PRNG draws use the bus-level xorshift32 PRNG (`buses/vrtlbus0/seed`). Draw order across
 devices on the same bus is the same interleaved order as for UART.
 
-> **Open 2:** Is the shim notification hook (step 1 above) implementable using only
-> public gpiolib APIs (`gpio_chip` ops wrapper or `irq_chip` shim), or does it require
-> modifications to `gpio-sim.c`? The answer bounds what can be deterministically specified
-> here. If the hook requires in-tree changes, this spec is subject to revision once the
-> implementation boundary is confirmed.
-
 ### Transfer unit (v0.2.0)
 
-For GPIO, one transfer unit = **one harness write to a single gpio-sim debugfs line value
-file**. The transfer unit is evaluated once per write, independent of whether the requested
+For GPIO, one transfer unit = **one write to the `inject` sysfs attr**. The transfer unit
+is evaluated once per write, independent of whether the requested
 value matches the current line state (though a no-change write may resolve to zero
 `stats/value_changes` increments at commit time).
 
@@ -311,44 +291,34 @@ UART); it does **not** affect line state or the AUT's open line descriptors.
 
 | Kconfig symbol | Required | Notes |
 |---|---|---|
-| `CONFIG_GPIO_SIM` | mandatory | gpio-sim driver (Linux ≥ 5.17) |
+| `CONFIG_GPIOLIB` | mandatory | Core gpiolib; enables `gpiochip_add_data()` and the GPIO v2 ioctl API |
 | `CONFIG_GPIO_CDEV` | mandatory | `/dev/gpiochipN` character device; enabled by default when `CONFIG_GPIOLIB=y` (Linux ≥ 5.10) |
-| `CONFIG_GPIOLIB` | mandatory | Core gpiolib |
-| `CONFIG_CONFIGFS_FS` | mandatory | Required by gpio-sim chip provisioning (module load) |
-| `CONFIG_DEBUG_FS` | mandatory | Required for the harness injection path (`gpio-sim` debugfs) |
 
 ### Error behaviour
 
 | Condition | Behaviour |
 |---|---|
-| `insmod virtrtlab_gpio.ko` with `gpio-sim` not loaded | return `-ENODEV`; module does not remain resident |
+| `inject` write with `N` out of range (`N` > 7) | return `-EINVAL` |
+| `inject` write with `V` not in `{0, 1}` | return `-EINVAL` |
+| `inject` write with malformed format (missing `:`, non-decimal, empty) | return `-EINVAL` |
+| `read()` on `inject` | return `-EPERM` |
+| `inject` write while `enabled=0` | return `-EIO`; shim is active and gate fires |
+| `inject` write while bus `state=down` | return `-EIO` |
+| `inject` write on line currently owned by AUT as output | write returns `0` (success); the injection is accepted, goes through drop/bitflip/latency stages, but commits to the stored line value only — the AUT's `GPIO_V2_LINE_SET_VALUES_IOCTL` remains authoritative for the output state |
+| `read()` on `stats/reset` | return `-EPERM` |
+| `stats/reset` write value other than `0` | return `-EINVAL` |
 | `latency_ns`/`jitter_ns` write > 10 000 000 000 ns | return `-EINVAL` |
 | `drop_rate_ppm`/`bitflip_rate_ppm` write > 1 000 000 | return `-EINVAL` |
-| `stats/reset` write value other than `0` | return `-EINVAL` |
-| `read()` on `stats/reset` | return `-EPERM` |
-| Harness writes to gpio-sim debugfs while `enabled=0` | passed through without fault injection; no error returned |
 | AUT `open("/dev/gpiochipN")` | always succeeds regardless of `enabled` or bus `state` |
-| AUT requests a line as output; harness writes to that line's debugfs value | write succeeds; gpio-sim ignores harness writes on AUT-owned output lines |
-| `rmmod virtrtlab_gpio` with AUT holding open line fds | gpio-sim chip is removed; open line fds return `-ENODEV` on subsequent ioctl |
-
-> **Open 3:** What stable path does the harness use to locate `/dev/gpiochipN`? The
-> `chip_path` attr is proposed as the primary mechanism. An alternative is a udev rule
-> that creates a symlink at `/dev/virtrtlab-gpio0`. Decision needed before v0.2.0 is
-> tagged.
-
-> **Open 4:** Does `bus state=down` block or pass-through harness GPIO injection? For
-> UART, `state=down` halts the daemon path. For GPIO, gpio-sim is a separate subsystem and
-> `state=down` does not automatically propagate to it. Aligning semantics across device
-> families is desirable but requires an explicit decision.
+| `rmmod virtrtlab_gpio` with AUT holding open line fds | gpiochip is removed; open line fds return `-ENODEV` on subsequent ioctl |
 
 ### Test-oriented examples
 
-Discover the chip path and drive line 0 high:
+Discover the chip path and drive line 0 high via the `inject` attr:
 
 ```sh
 CHIP=$(cat /sys/kernel/virtrtlab/devices/gpio0/chip_path)  # e.g. /dev/gpiochip2
-CHIP_LABEL=$(gpiodetect | awk -v chip="$CHIP" '$0 ~ chip { print $2 }')  # e.g. virtrtlab-gpio0
-echo 1 > /sys/kernel/debug/gpio-sim/${CHIP_LABEL}/line0/value
+echo 0:1 > /sys/kernel/virtrtlab/devices/gpio0/inject
 ```
 
 Verify the AUT can read the injected value using `gpioget` (libgpiod ≥ 1.6):
@@ -362,7 +332,7 @@ Enable drop-all and verify transitions are suppressed:
 
 ```sh
 echo 1000000 > /sys/kernel/virtrtlab/devices/gpio0/drop_rate_ppm
-echo 1 > /sys/kernel/debug/gpio-sim/virtrtlab-gpio0/line0/value
+echo 0:1 > /sys/kernel/virtrtlab/devices/gpio0/inject
 gpioget --chip $CHIP 0
 # Expected output: 0  (line state unchanged)
 cat /sys/kernel/virtrtlab/devices/gpio0/stats/drops
@@ -375,34 +345,41 @@ Verify edge event delivery with latency:
 echo 5000000 > /sys/kernel/virtrtlab/devices/gpio0/latency_ns  # 5 ms
 gpionotify --chip $CHIP --rising-edge 0 &
 NOTIFY_PID=$!
-echo 1 > /sys/kernel/debug/gpio-sim/virtrtlab-gpio0/line0/value
+echo 0:1 > /sys/kernel/virtrtlab/devices/gpio0/inject
 # Edge event arrives ~5 ms after the write above
 wait $NOTIFY_PID
 cat /sys/kernel/virtrtlab/devices/gpio0/stats/edge_events
 # Expected output: 1
 ```
 
-### Open questions
+### Decisions (v0.2.0)
 
-> **Open 1:** Stable harness injection surface — should VirtRTLab expose a `value` or
-> `inject` sysfs attr that wraps the gpio-sim debugfs write, for harness script
-> compatibility with v0.1.0?
+**Open 1 — Harness injection surface** → **closed**: `inject` sysfs attr at
+`/sys/kernel/virtrtlab/devices/gpioN/inject`, format `"N:V"`. Provides a stable,
+version-controlled injection path; no dependency on gpio-sim debugfs layout.
 
-> **Open 2:** Shim hook feasibility — is the fault-injection notification hook
-> implementable via public gpiolib APIs, or does it require in-tree modification to
-> `gpio-sim.c`?
+**Open 2 — Shim hook feasibility** → **closed**: `virtrtlab_gpio` registers a native
+`gpio_chip` via `gpiochip_add_data()`. Fault injection is applied inside `inject_store()`
+before committing the line value via `gpiochip_set_value_cansleep()`. All code uses
+public gpiolib APIs only; no in-tree patch required.
 
-> **Open 3:** Stable `/dev` path — `chip_path` sysfs attr vs. udev symlink at
-> `/dev/virtrtlab-gpioN`.
+**Open 3 — Stable `/dev` path** → **closed**: `chip_path` sysfs attr is the primary
+discovery mechanism. Derived from `gc.base` at `gpiochip_add_data()` time and exposed
+read-only at `/sys/kernel/virtrtlab/devices/gpioN/chip_path`. No udev symlink required.
 
-> **Open 4:** `bus state=down` semantics for GPIO — block injection or pass-through?
+**Open 4 — `bus state=down` semantics for GPIO** → **deferred to v0.3.0**: `state=down`
+is not propagated to the GPIO device in v0.2.0. `inject` writes while bus is `down`
+return `-EIO` (bus gate enforced in `inject_store()`). The AUT's open line fds are
+unaffected by bus state in v0.2.0.
 
-> **Open 5:** `num_lines` configurability — module parameter, per-bank sysfs attr, or
-> fixed at 8.
+**Open 5 — `num_lines` configurability** → **closed**: fixed at 8 per instance in
+v0.2.0. Exposed read-only via the `num_lines` sysfs attr. Configurable bank widths
+deferred to v0.3.0.
 
-> **Open 6:** `active_low` read-back — should VirtRTLab expose a read-only per-line
-> `active_low` attr derived from the AUT's ioctl flags, to help harness scripts compute
-> the correct injection value?
+**Open 6 — `active_low` read-back** → **closed (not exposed)**: the harness writes
+physical values; the AUT controls polarity via its `GPIO_V2_GET_LINE_IOCTL` flags.
+Exposing `active_low` from gpiolib internal state would require non-public API access and
+is not needed in v0.2.0.
 
 ## Rationale
 
@@ -412,11 +389,11 @@ The AUT configures the serial line via `tcsetattr()` — this is the standard PO
 **Why no `mode` or `fault_policy` in sysfs?**  
 Record/replay and named fault profiles are orchestration concepts. They are cleaner to implement in Python scripts that write individual sysfs attrs, rather than encoding policy state in the kernel. This keeps the kernel surface minimal and auditable.
 
-**Why retire the custom banked GPIO and adopt gpio-sim (v0.2.0)?**  
-The v0.1.0 custom gpiochip implementation provided no standard AUT interface: a userspace AUT using `libgpiod` or the GPIO v2 ioctl API could not interact with it. VirtRTLab's purpose is to simulate real hardware the AUT has been compiled against; a private sysfs-only bank model defeats this goal. `gpio-sim` is upstream, maintained, and provides both the char-device AUT interface and a debugfs harness injection surface, eliminating the need to re-implement gpiolib chip infrastructure.
+**Why replace the v0.1.0 custom banked GPIO with a native `gpio_chip` (v0.2.0)?**  
+The v0.1.0 implementation provided no standard AUT interface: a userspace AUT using `libgpiod` or the GPIO v2 ioctl API could not interact with it. VirtRTLab's purpose is to simulate real hardware the AUT has been compiled against; a private sysfs-only bank model defeats this goal. Registering a native `struct gpio_chip` via `gpiochip_add_data()` exposes a standards-compliant `/dev/gpiochipN` char device using only public kernel API — no out-of-tree dependency, no `CONFIG_GPIO_SIM`, no configfs/debugfs bootstrap required.
 
-**Why keep VirtRTLab sysfs for fault control rather than gpio-sim configfs (v0.2.0)?**  
-Fault injection parameters are dynamic: CI test scripts change them at runtime between cases. gpio-sim's configfs surface is a provisioning-time interface (used at chip creation), not a runtime control surface. VirtRTLab sysfs remains the correct layer for runtime harness control.
+**Why keep VirtRTLab sysfs for fault control (v0.2.0)?**  
+Fault injection parameters are dynamic: CI test scripts change them at runtime between test cases. The native `gpio_chip` API has no built-in runtime harness surface. VirtRTLab sysfs attrs (`inject`, `latency_ns`, `drop_rate_ppm`, etc.) remain the correct layer for runtime harness control.
 
 ## Decisions
 
@@ -430,8 +407,8 @@ Fault injection parameters are dynamic: CI test scripts change them at runtime b
 - After `rmmod`/`insmod`, the fault injection sequence is identical to the previous load if `seed` is not written — deterministic by default.
 - After `state=reset`, the next fault draw continues from wherever the PRNG left off. If test reproducibility requires a known sequence across resets, write `seed` explicitly after each `state=reset`.
 
-**GPIO line count** — default 8 lines per `gpioN` instance in v0.2.0. The exact configurability surface (module parameter vs. sysfs attr) is an open question (Open 5); `num_lines` is read-only in sysfs and reflects the value chosen at provisioning time.
+**GPIO line count** — fixed at 8 lines per `gpioN` instance in v0.2.0. `num_lines` is read-only in sysfs and reflects this fixed value. Configurability is deferred to a later version.
 
-**GPIO transfer unit** — changed from bank-write (v0.1.0) to per-line-write (v0.2.0) to align with gpio-sim's per-line debugfs interface and the GPIO v2 API's per-line granularity. `drop_rate_ppm` and `bitflip_rate_ppm` are now evaluated independently for each line write.
+**GPIO transfer unit** — changed from bank-write (v0.1.0) to per-line-write (v0.2.0) to align with the GPIO v2 API's per-line granularity and the `inject` attr's `"N:V"` format. `drop_rate_ppm` and `bitflip_rate_ppm` are now evaluated independently for each line write.
 
 **`stats/bitflips` counter** — added in v0.2.0. In v0.1.0, bitflips were subsumed in `stats/value_changes`. Separating them allows test assertions to distinguish intended transitions (AUT response to correct injection) from corruption events (bitflip gate fired).
