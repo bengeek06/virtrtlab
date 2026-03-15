@@ -22,7 +22,7 @@ Sub-directories: `buses/`, `devices/`.
 |---|---|---|---|
 | `state` | rw | string | `up\|down\|reset` |
 | `clock_ns` | ro | u64 | `CLOCK_MONOTONIC` snapshot (ns) taken at the moment the attr is read; nanosecond-precision via `ktime_get_ns()`, not driven by the TX hrtimer |
-| `seed` | rw | u32 | RNG seed for stochastic fault profiles; the xorshift32 PRNG is re-seeded on write; one PRNG draw per drop/bitflip decision. `0` is invalid and returns `-EINVAL` because xorshift32 must keep a non-zero internal state |
+| `seed` | rw | u32 | xorshift32 PRNG seed for stochastic fault profiles. **Read**: returns the current internal PRNG state (not necessarily the value last written — draws advance the state). **Write**: immediately replaces the internal state with the written value; `0` is invalid and returns `-EINVAL`. On `insmod`, the PRNG is initialised to `1` (hard-coded; always identical after a reload). `state=reset` does **not** affect the PRNG — to reset to a known sequence, write `seed` explicitly (e.g. `echo 1 > seed`). One PRNG draw is consumed per drop decision and one per bitflip decision. |
 
 ### `state` semantics
 
@@ -46,7 +46,7 @@ When `state` is set to `down` and the wire device is not open: pending TX bytes 
 |---|---|---|---|
 | `type` | ro | string | `uart\|gpio\|spi\|adc\|dac\|…` |
 | `bus` | ro | string | Parent bus, e.g. `vrtlbus0` |
-| `enabled` | rw | bool | `0\|1` — gate all data flow; default `1` |
+| `enabled` | rw | bool | `0\|1` — device-level data flow gate; default `1`. Writing `0` blocks new AUT `write()` calls (return `-EIO`) **and** drains any bytes already queued in the TX buffer as `stats/drops` without delivering them to the wire device. Writing `1` lifts the block; the hrtimer is rearmed on the next AUT `write()`. |
 | `latency_ns` | rw | u64 | Base delivery latency per transfer unit (ns); default `0` |
 | `jitter_ns` | rw | u64 | Uniform jitter amplitude (ns); sampled as a uniform random value in $[0, \text{jitter\_ns}]$ added to `latency_ns`; default `0` |
 | `drop_rate_ppm` | rw | u32 | Drops per million transfer units; default `0` |
@@ -61,6 +61,8 @@ When `state` is set to `down` and the wire device is not open: pending TX bytes 
 > **Fault attr update timing**: writes to `latency_ns`, `jitter_ns`, `drop_rate_ppm`, or `bitflip_rate_ppm` take effect from the **next transfer scheduling point** after the sysfs store returns. For UART, that means the next hrtimer callback; for GPIO, the next sysfs write to `value`. No already-scheduled transfer unit is modified in place.
 
 > **GPIO delayed-write snapshot rule**: when a GPIO `value` write is accepted for delayed delivery, the kernel snapshots the requested logical bank value together with the current `latency_ns`, `jitter_ns`, `drop_rate_ppm`, `bitflip_rate_ppm`, `direction`, and `active_low` state before the sysfs store returns. A later change to those attrs does not rewrite a bank update that was already accepted and scheduled.
+
+> **`enabled=false` vs `state=down`**: both halt data flow immediately and drain pending TX bytes into `stats/drops`. The difference is scope (`enabled` is per-device; `state` is per-bus) and reset behaviour (`state=reset` restores `enabled=1` on all devices; writing `enabled` only affects the target device). When `state=down` is set, `enabled` values are preserved unchanged and take effect again after `state=up`.
 
 > **Removed in v1**: `mode` (normal/record/replay) and `fault_policy` — record/replay and policy management are handled in userspace scripts, not the kernel.
 
@@ -103,11 +105,13 @@ Writes take effect on the **next** open of `/dev/ttyVIRTLABx` (not live-resizabl
 | `tx_bytes` | u64 | Bytes received from the AUT, counted **before** fault injection. `tx_bytes − drops ≈ bytes actually delivered to the wire device`. |
 | `rx_bytes` | u64 | Bytes received from wire device toward AUT |
 | `overruns` | u64 | **RX buffer only**: bytes evicted from the RX buffer (wire device → AUT) on overflow; incremented by the count of bytes evicted per overflow event. TX buffer never evicts — it applies backpressure instead. |
-| `drops` | u64 | Bytes discarded by fault injection (`drop_rate_ppm`) or by `state=down` with no daemon; incremented by the byte count of each dropped hrtimer burst. |
+| `drops` | u64 | Bytes that left the AUT TX buffer but were **not** delivered to the wire device, for any of the following reasons: (1) fault injection gate (`drop_rate_ppm`); (2) `state=down` with no daemon attached; (3) `enabled=false` gate — bytes already queued when `enabled` is written to `0`; (4) port close (`tty_close`) while TX bytes are still pending. Incremented by the byte count of the affected burst. Invariant: `tx_bytes − drops ≈ bytes actually delivered to the wire device`. |
 
 Counters are reset by writing `0` to `stats/reset`. Counters wrap silently at `UINT64_MAX` (modular arithmetic, no saturation).
 
 > **Counter units (UART)**: all four counters measure individual **bytes**. For future peripheral types (CAN, SPI, …), counter units are type-specific and documented in each peripheral's spec section; the common-attrs table does not define units.
+
+> **`drops` vs `overruns`**: `drops` counts bytes lost on the **AUT → wire** path (TX side). `overruns` counts bytes evicted from the **wire → AUT** RX buffer on overflow (RX side). A high `drops` value indicates fault injection activity or bus state events; a high `overruns` value indicates the simulator is not consuming the wire device fast enough.
 
 ### Error behaviour
 
@@ -262,5 +266,9 @@ For `v0.1.0`, VirtRTLab needs a simple GPIO contract that feels familiar to Linu
 **Baud rate change notification** — not in v0.1.0: `tcsetattr()` updates termios state and the sysfs `baud` attr atomically. `virtrtlabd` reads `baud` from sysfs on demand; no uevent or control byte is generated by the kernel.
 
 **PRNG scope** — the xorshift32 state lives at the bus level (`buses/vrtlbus0/seed`), shared across all devices on that bus. Devices on the same bus draw from the shared state in interleaved order; each device does not maintain its own PRNG. For reproducible CI results, write `seed` before activating stochastic fault injection and record it in test artifacts.
+
+**PRNG lifecycle** — the PRNG state is initialised to `1` at module load and is **not** reset by `state=reset`. This is intentional: `state=reset` resets the fault _parameters_ (rates, latency, etc.) but not the _sequence_ from which draws are taken. Two consequences:
+- After `rmmod`/`insmod`, the fault injection sequence is identical to the previous load if `seed` is not written — deterministic by default.
+- After `state=reset`, the next fault draw continues from wherever the PRNG left off. If test reproducibility requires a known sequence across resets, write `seed` explicitly after each `state=reset`.
 
 **GPIO bank width** — fixed at 8 bits in `v0.1.0`: each `gpioN` instance models exactly 8 logical lines. Wider banks or configurable bank widths are deferred.
