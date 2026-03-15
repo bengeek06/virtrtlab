@@ -33,58 +33,143 @@ The kernel applies fault injection (latency, jitter, drop, bitflip) **before** d
 
 Bytes are delivered in-order, preserving the UART byte stream.
 
-## Relay logic (virtrtlabd)
+## Implementation
 
-```python
-# Simplified relay loop in virtrtlabd
+`virtrtlabd` is implemented in **C (GNU11)**. The daemon sits in the data path for all UART instances simultaneously; GC pauses and interpreter startup overhead are incompatible with the latency and resource budgets of VirtRTLab. The sections below specify the source layout, event loop, buffer strategy, and signal handling that implementations must follow.
 
-def open_wire():
-    return open('/dev/virtrtlab-wire0', O_RDWR)  # exclusive; a concurrent second open() returns -EBUSY
+### Source layout
 
-server_sock = socket(AF_UNIX, SOCK_STREAM)
-bind(server_sock, '/run/virtrtlab/uart0.sock')
-listen(server_sock)
-wire_fd = open_wire()
-
-while True:
-    # Wait for a simulator to connect
-    client_sock = accept(server_sock)
-
-    # Relay until simulator disconnects or bus transitions
-    while True:
-        r, _, _ = select([wire_fd, client_sock], [], [])
-        if wire_fd in r:
-            data, err = read(wire_fd)          # from AUT
-            if err == EIO:                     # state=down: bus halted, wire fd still valid
-                time.sleep(0.01)               # back-off; POLLHUP|POLLERR clears on state=up
-                continue
-            if not data:                       # EOF: state=reset has invalidated this wire_fd
-                close(wire_fd)
-                wire_fd = open_wire()          # re-open for clean post-reset state
-                break                          # disconnect simulator; next accept() is clean
-            write(client_sock, data)           # to simulator
-        if client_sock in r:
-            data = recv(client_sock)
-            if not data:                       # simulator disconnected
-                # Drain pending AUT→daemon bytes so next simulator starts clean.
-                # wire_fd stays open to receive bus state notifications.
-                set_nonblocking(wire_fd)
-                while True:
-                    stale, err = read(wire_fd)
-                    if err == EAGAIN:          # all pending AUT→daemon bytes drained
-                        break
-                    if err == EIO:             # bus transitioned to state=down during drain
-                        break                  # keep wire_fd open; outer loop observes state changes
-                    if not stale:              # EOF: state=reset invalidated wire_fd
-                        close(wire_fd)
-                        wire_fd = open_wire()
-                        break
-                set_blocking(wire_fd)
-                break
-            write(wire_fd, data)               # to AUT (non-blocking: EAGAIN → overrun)
+```
+daemon/
+├── main.c          — argument parsing, optional daemonize, signal setup, top-level lifecycle
+├── epoll_loop.c    — shared epoll instance; registers/unregisters fds; dispatches events
+├── epoll_loop.h
+├── instance.c      — per-UART state machine (WAIT_CLIENT → RELAYING → DRAINING)
+├── instance.h      — struct uart_instance definition
+└── Makefile        — CFLAGS = -Wall -Wextra -O2 -std=gnu11; links against libc only
 ```
 
-On simulator disconnect, the daemon drains only the AUT→daemon direction to avoid replaying stale bytes into the next simulator session. Drain runs in non-blocking mode until `read()` returns `-EAGAIN`; if the bus transitions to `state=down`, `read()` may return `-EIO` and draining stops immediately. If `state=reset` occurs during drain, `read()` returns EOF (`0`) and the daemon must re-open the wire device before accepting the next simulator connection.
+### Per-instance state machine
+
+Each UART instance N owns:
+
+- `wire_fd` — file descriptor for `/dev/virtrtlab-wireN` (opened at daemon start, re-opened on reset)
+- `server_fd` — listening `AF_UNIX SOCK_STREAM` socket bound to `/run/virtrtlab/uartN.sock`
+- `client_fd` — connected simulator socket; `-1` when no simulator is present
+
+| State | Active fds monitored by epoll | Transition |
+|---|---|---|
+| `WAIT_CLIENT` | `server_fd` (EPOLLIN) | `accept()` succeeds → `RELAYING` |
+| `RELAYING` | `wire_fd` (EPOLLIN), `client_fd` (EPOLLIN) | client EOF → drain inline → `WAIT_CLIENT`; wire EOF → reopen wire → `WAIT_CLIENT` |
+
+On simulator disconnect, stale wire bytes are drained **inline** (not via a separate epoll state): `wire_fd` is set `O_NONBLOCK` and read in a loop until `EAGAIN`/`EIO`/EOF, then flags are restored before re-entering `WAIT_CLIENT`. An epoll-driven `DRAINING` state was considered but rejected: `EPOLLIN` never fires on an empty wire device when the AUT is silent, causing an indefinite wait. The inline drain is bounded by the kernel ring buffer (~4 KB).
+
+### epoll loop
+
+A **single `epoll` instance** is shared across all UART instances. `select()` and `poll()` are not used. With `num_uarts` up to 8, `epoll_wait()` manages at most 3 fds per instance (wire + server + client) = 24 fds, O(1) regardless of count.
+
+Each fd is registered with a pointer to a small dispatch context in `epoll_event.data.ptr`:
+
+```c
+struct evt_ctx {
+    struct uart_instance *inst;
+    enum fd_role role;          /* ROLE_WIRE | ROLE_SERVER | ROLE_CLIENT | ROLE_SIGNAL */
+};
+```
+
+The main loop is:
+
+```c
+epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+
+/* Register the signal fd once, outside the per-instance loop. */
+epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sig_fd, &ev_signal);
+
+/* For each instance N at startup: */
+for (int n = 0; n < num_uarts; n++) {
+    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, inst[n].server_fd, &ev_server);
+    /* wire_fd is NOT added here: only server_fd is watched in WAIT_CLIENT. */
+}
+
+for (;;) {
+    n = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+    for (i = 0; i < n; i++)
+        dispatch(events[i].data.ptr, events[i].events);
+}
+```
+
+### Static buffers
+
+Each instance owns two byte arrays allocated once at startup — no heap allocation occurs in the relay hot path:
+
+| Field | Size | Direction |
+|---|---|---|
+| `inst->wire_buf[4096]` | 4096 B | wire → client (AUT → simulator) |
+| `inst->sock_buf[4096]` | 4096 B | client → wire (simulator → AUT) |
+
+4096 bytes matches the default TX/RX FIFO size of the wire device. If a single `read()` returns fewer bytes, the partial result is forwarded immediately — no coalescing, no dynamic sizing.
+
+### Signal handling — `signalfd`
+
+Signals are handled via `signalfd(2)`, not async `sigaction` handlers. SIGTERM and SIGINT become ordinary file-descriptor events in the epoll loop, with no async-signal-safety constraints:
+
+```c
+sigset_t mask;
+sigemptyset(&mask);
+sigaddset(&mask, SIGTERM);
+sigaddset(&mask, SIGINT);
+sigprocmask(SIG_BLOCK, &mask, NULL);            /* block normal delivery to the process */
+sig_fd = signalfd(-1, &mask, SFD_CLOEXEC);     /* readable when a signal arrives */
+epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sig_fd, &ev_signal);
+```
+
+On `SIGTERM` or `SIGINT`, the dispatch function:
+1. Calls `unlink("/run/virtrtlab/uartN.sock")` for every instance
+2. Closes all fds in reverse order of creation (`client_fd`, `server_fd`, `wire_fd`, `sig_fd`, `epoll_fd`)
+3. Exits with `EXIT_SUCCESS`
+
+### Relay behaviour
+
+**RELAYING — `wire_fd` readable (AUT → simulator)**
+
+```
+n = read(wire_fd, wire_buf, sizeof wire_buf)
+n < 0, errno == EIO   → usleep(10000); continue           /* state=down: fd valid, bus halted */
+n == 0                → close(wire_fd); wire_fd = reopen  /* state=reset: fd invalidated */
+                        close(client_fd); client_fd = -1
+                        epoll: remove client_fd, keep server_fd → WAIT_CLIENT
+n > 0                 → write(client_fd, wire_buf, n)     /* forward to simulator */
+```
+
+**RELAYING — `client_fd` readable (simulator → AUT)**
+
+```
+n = recv(client_fd, sock_buf, sizeof sock_buf, 0)
+n == 0  → close(client_fd); client_fd = -1
+           inline drain (see above) → WAIT_CLIENT
+n > 0   → write(wire_fd, sock_buf, n)
+           /* EAGAIN: RX buffer full → byte lost, stat_overruns incremented by kernel */
+```
+
+**Inline drain on simulator disconnect**
+
+On simulator disconnect, the daemon discards stale AUT→daemon bytes so the next simulator starts from a clean stream. `wire_fd` stays open throughout to preserve bus state change notifications. The drain is done inline (not via a separate epoll state) using `O_NONBLOCK`:
+
+```
+fl = fcntl(wire_fd, F_GETFL, 0)
+fcntl(wire_fd, F_SETFL, fl | O_NONBLOCK)   /* set non-blocking for drain */
+
+loop:
+    n = read(wire_fd, wire_buf, sizeof wire_buf)
+    n > 0                   → discard silently, continue
+    n == 0                  → close(wire_fd); wire_fd = reopen  /* state=reset during drain */
+                               break
+    n < 0, errno == EAGAIN  → drain complete; break
+    n < 0, errno == EIO     → drain stops (bus went down); break
+
+fcntl(wire_fd, F_SETFL, fl)   /* restore original flags */
+→ WAIT_CLIENT
+```
 
 ## Testing
 
@@ -115,6 +200,9 @@ cat capture.bin | socat - UNIX-CONNECT:/run/virtrtlab/uart0.sock
 
 ## Rationale
 
+**Why C (GNU11) and not Python for the daemon?**  
+The daemon is in the data path for every UART instance. CPython's garbage collector introduces multi-millisecond pauses at unpredictable intervals — exactly the kind of jitter that VirtRTLab is designed to *measure* in the AUT, not inject at the infrastructure level. A C process with static buffers has an RSS footprint under 512 KB for 8 instances; a Python interpreter starts at 20–50 MB. Build-time dependency: libc only. Startup latency: < 5 ms (vs. 50–200 ms for CPython), which matters in CI where modules are loaded and unloaded repeatedly.
+
 **Why raw bytes instead of JSONL?**  
 The AUT exchanges raw bytes with the simulated UART. Wrapping bytes in JSONL would require an extra encode/decode step in the daemon and add latency. Fault injection (drops, bitflips) operates at the byte level in the kernel — the userspace socket sees the already-mutated stream.
 
@@ -126,3 +214,5 @@ Per-device sockets let the simulator process use a plain `connect()` to `/run/vi
 **Multiple connections per socket — single active connection:** `virtrtlabd` accepts exactly one `connect()` per socket at a time. A second `connect()` attempt is rejected (the process receives `ECONNREFUSED`). No observer/tap mode in v0.1.0.
 
 **Automatic reconnect after simulator disconnect — flush and stay:** when the simulator closes the socket, `virtrtlabd` flushes (discards) any bytes buffered in the wire device for that connection, then immediately returns to `listen()`. The daemon does not restart; the next simulator can `connect()` to a clean slate. Bytes accumulated during the disconnect window are lost.
+
+**Implementation language — C (GNU11):** `virtrtlabd` must be written in C (GNU11), compiled with `-Wall -Wextra -O2`, and link only against libc. Python or other scripting languages are excluded from the daemon binary. `virtrtlabctl` (the control CLI) remains in Python as it is not in the data path.
