@@ -8,6 +8,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/device.h>
+#include <linux/gpio/driver.h>
 #include <linux/hrtimer.h>
 #include <linux/init.h>
 #include <linux/module.h>
@@ -18,7 +19,6 @@
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/workqueue.h>
-#include <linux/gpio/driver.h>
 #include "virtrtlab_core.h"
 
 /* -------------------------------------------------------------------------
@@ -28,6 +28,10 @@
 
 #define VIRTRTLAB_GPIO_MAX_DEVS		32
 #define VIRTRTLAB_GPIO_LINES		8
+/*
+ * Both latency_ns and jitter_ns are individually bounded by this constant.
+ * The maximum combined delivery delay is therefore 2× this value (20 seconds).
+ */
 #define VIRTRTLAB_GPIO_MAX_LATENCY_NS	10000000000ULL
 #define VIRTRTLAB_GPIO_MAX_PPM		1000000U
 
@@ -178,6 +182,33 @@ static int virtrtlab_gpio_get_multiple(struct gpio_chip *gc,
 	return 0;
 }
 
+static int virtrtlab_gpio_set_multiple(struct gpio_chip *gc,
+				       unsigned long *mask, unsigned long *bits)
+{
+	struct virtrtlab_gpio_dev *gdev = gpiochip_get_data(gc);
+	unsigned int i;
+
+	mutex_lock(&gdev->lock);
+	for_each_set_bit(i, mask, VIRTRTLAB_GPIO_LINES) {
+		if (gdev->lines[i].is_output)
+			gdev->lines[i].value = test_bit(i, bits) ? 1 : 0;
+	}
+	mutex_unlock(&gdev->lock);
+	return 0;
+}
+
+static int virtrtlab_gpio_get_direction(struct gpio_chip *gc, unsigned int offset)
+{
+	struct virtrtlab_gpio_dev *gdev = gpiochip_get_data(gc);
+	int dir;
+
+	mutex_lock(&gdev->lock);
+	dir = gdev->lines[offset].is_output ?
+	      GPIO_LINE_DIRECTION_OUT : GPIO_LINE_DIRECTION_IN;
+	mutex_unlock(&gdev->lock);
+	return dir;
+}
+
 /* -------------------------------------------------------------------------
  * [4] Per-line apply — process context (directly or via workqueue)
  * -------------------------------------------------------------------------
@@ -189,6 +220,12 @@ static int virtrtlab_gpio_get_multiple(struct gpio_chip *gc,
  * Implements the bitflip gate and state commit.  The enabled gate and drop
  * gate are evaluated earlier in inject_store() before the snapshot is taken.
  * Called with no locks held.
+ *
+ * Design (spec §inject attr): inject on a line currently owned by the AUT as
+ * output goes through the full 7-step shim (drop / bitflip / latency) so PRNG
+ * draws remain deterministic, but the commit step is silently skipped — the
+ * AUT remains authoritative for the line state.  apply_gen is still advanced
+ * so that stale-dispatch properly terminates.
  */
 static void virtrtlab_gpio_line_apply(struct virtrtlab_gpio_dev *gdev,
 				      unsigned int line_idx)
@@ -208,7 +245,6 @@ static void virtrtlab_gpio_line_apply(struct virtrtlab_gpio_dev *gdev,
 
 	snap_val    = line->snap_value;
 	bitflip_ppm = line->snap_bitflip_ppm;
-	old_val     = line->value;
 
 	mutex_unlock(&gdev->lock);
 
@@ -231,12 +267,21 @@ static void virtrtlab_gpio_line_apply(struct virtrtlab_gpio_dev *gdev,
 		mutex_unlock(&gdev->lock);
 		return;
 	}
+	old_val = line->value;
 	line->apply_gen = gen;
-	line->value = new_val;
-	if (new_val != old_val)
-		gdev->stat_value_changes++;
-	if (new_val != snap_val)
-		gdev->stat_bitflips++;
+	/*
+	 * Commit only for input lines.  Inject on an AUT-owned output line is
+	 * accepted by the shim (PRNG draws consumed, drop/latency honoured) but
+	 * the stored line value is not overwritten — the AUT is authoritative.
+	 * Stats are not updated either: no observable state change occurred.
+	 */
+	if (!line->is_output) {
+		line->value = new_val;
+		if (new_val != old_val)
+			gdev->stat_value_changes++;
+		if (new_val != snap_val)
+			gdev->stat_bitflips++;
+	}
 	mutex_unlock(&gdev->lock);
 }
 
@@ -329,9 +374,15 @@ static ssize_t inject_store(struct device *dev, struct device_attribute *attr,
 
 	ret = virtrtlab_gpio_parse_inject(buf, count, &line_idx, &val);
 	if (ret)
-		return ret;
+		return -EINVAL;
 
 	/*
+	 * Inject semantics (spec §inject attr):
+	 *   - bus gate, enabled gate, drop gate, latency, and bitflip shim all
+	 *     apply regardless of line direction.
+	 *   - commit (line_apply step 6) is skipped silently for AUT-owned output
+	 *     lines; the write to sysfs still returns count (success).
+	 *
 	 * Bus gate — checked before acquiring gdev->lock.
 	 * TOCTOU note: same reasoning as v0.1.0 value_store(); acceptable race
 	 * for a simulator — production drivers re-check under a bus-level lock.
@@ -578,6 +629,9 @@ static DEVICE_ATTR_RO(chip_path);
 
 /* -------------------------------------------------------------------------
  * [8] Stats subdir attributes
+ *
+ * Note: all counters aggregate events across all 8 lines of the device.
+ * Per-line attribution is not available in v0.2.0.
  * -------------------------------------------------------------------------
  */
 
@@ -800,10 +854,6 @@ static int __init virtrtlab_gpio_init(void)
 		ret = device_add(&gdev->dev);
 		if (ret) {
 			pr_err("failed to register gpio%d: %d\n", n, ret);
-			for (i = 0; i < VIRTRTLAB_GPIO_LINES; i++) {
-				hrtimer_cancel(&gdev->lines[i].delay_timer);
-				cancel_work_sync(&gdev->lines[i].apply_work);
-			}
 			put_device(&gdev->dev);
 			goto err_unwind;
 		}
@@ -818,7 +868,9 @@ static int __init virtrtlab_gpio_init(void)
 		gdev->gc.direction_output = virtrtlab_gpio_direction_output;
 		gdev->gc.get            = virtrtlab_gpio_get;
 		gdev->gc.set            = virtrtlab_gpio_set;
+		gdev->gc.set_multiple   = virtrtlab_gpio_set_multiple;
 		gdev->gc.get_multiple   = virtrtlab_gpio_get_multiple;
+		gdev->gc.get_direction  = virtrtlab_gpio_get_direction;
 
 		ret = gpiochip_add_data(&gdev->gc, gdev);
 		if (ret) {
@@ -831,6 +883,16 @@ static int __init virtrtlab_gpio_init(void)
 			goto err_unwind;
 		}
 
+		/*
+		 * gc.base is the first GPIO number in the system GPIO numberspace,
+		 * not the gpiochip character device index.
+		 * gpio_device_to_device(gc.gpiodev) returns the gpio_device's
+		 * struct device whose kobject name is "gpiochipN" — the same N
+		 * that appears in /dev/gpiochipN.  gc.gpiodev is a public field
+		 * of struct gpio_chip (driver.h); gpio_device_to_device() is the
+		 * public API to dereference it without touching the opaque internals
+		 * of struct gpio_device.
+		 */
 		snprintf(gdev->chip_path, sizeof(gdev->chip_path), "/dev/%s",
 			 dev_name(gpio_device_to_device(gdev->gc.gpiodev)));
 

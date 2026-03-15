@@ -26,8 +26,8 @@ KNOWN_MODULES = ["virtrtlab_core", "virtrtlab_uart", "virtrtlab_gpio"]
 
 # type → (ko filename, insmod parameter name)
 MODULE_MAP: dict[str, tuple[str, str]] = {
-    "uart": ("virtrtlab_uart.ko", "num_uarts"),
-    "gpio": ("virtrtlab_gpio.ko", "num_gpio"),
+    "uart": ("virtrtlab_uart.ko", "num_uart_devices"),
+    "gpio": ("virtrtlab_gpio.ko", "num_gpio_devs"),
 }
 
 # ---------------------------------------------------------------------------
@@ -47,7 +47,10 @@ class VirtrtlabError(Exception):
 
 
 def _sudo_prefix(no_sudo: bool) -> list[str]:
-    return [] if no_sudo else ["sudo"]
+    # Skip sudo when already running as root (e.g. under sudo pytest):
+    # Popen(["sudo", daemon_bin]) stores the sudo PID, not the daemon's PID,
+    # which breaks pid-file tracking. Running as root needs no wrapper.
+    return [] if (no_sudo or os.geteuid() == 0) else ["sudo"]
 
 
 def _run_cmd(
