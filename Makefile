@@ -143,8 +143,9 @@ _check_root:
 
 # ── install ───────────────────────────────────────────────────────────────────
 
-install: _check_root all
+install: _check_root
 	@echo "=== Installing VirtRTLab $(VERSION) ==="
+	@echo "    (run 'make all' first if modules/daemon are not built yet)"
 	install -d $(MODDIR)
 	install -m 644 kernel/virtrtlab_core.ko \
 	              kernel/virtrtlab_uart.ko \
@@ -207,11 +208,12 @@ dkms-add: _check_root
 		exit 1; \
 	}
 	@echo "=== Registering virtrtlab $(VERSION) with DKMS ==="
+	rm -rf $(DKMSRC)
 	install -d $(DKMSRC)
-	cp -a . $(DKMSRC)/
-	$(MAKE) -C $(DKMSRC)/kernel KDIR=$(KDIR) clean 2>/dev/null || true
-	$(MAKE) -C $(DKMSRC)/daemon clean 2>/dev/null || true
-	dkms add virtrtlab/$(VERSION)
+	cp -a kernel daemon dkms.conf Makefile $(DKMSRC)/
+	-[ -d cli ] && cp -a cli $(DKMSRC)/
+	-cp -a LICENSE* $(DKMSRC)/ 2>/dev/null || true
+	/usr/sbin/dkms add virtrtlab/$(VERSION)
 	@echo ""
 	@echo "    Source registered at: $(DKMSRC)"
 	@echo "    Build and install:"
