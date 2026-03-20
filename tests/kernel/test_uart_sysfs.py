@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 """
 test_uart_sysfs.py — sysfs contract tests for virtrtlab_uart.
 

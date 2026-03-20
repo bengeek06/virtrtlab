@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+
 # VirtRTLab — Wire device and daemon socket (v1)
 
 Source of truth is the root [README.md](../README.md). This file keeps transport details focused.

@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+
 # VirtRTLab — `virtrtlabctl` CLI (v1)
 
 Source of truth is the root [README.md](../README.md). This file keeps CLI-specific

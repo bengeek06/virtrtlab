@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 """
 test_daemon_reconnect.py — reconnect test for virtrtlabd (issue #10).
 

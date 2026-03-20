@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 """
 conftest.py — shared pytest fixtures for VirtRTLab kernel integration tests.
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 """
 test_daemon_shutdown.py — shutdown tests for virtrtlabd (issue #10).
 

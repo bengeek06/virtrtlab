@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 """
 test_daemon_startup.py — daemon startup tests for virtrtlabd (issue #10).
 

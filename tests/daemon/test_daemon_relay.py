@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 """
 test_daemon_relay.py — byte relay tests for virtrtlabd (issue #10).
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 """
 test_gpio_sysfs.py — sysfs contract tests for virtrtlab_gpio v0.2.0.
 

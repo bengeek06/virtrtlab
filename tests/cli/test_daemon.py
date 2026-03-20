@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 """
 test_daemon.py — integration tests for cmd_daemon.
 

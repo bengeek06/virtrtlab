@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 CC      = gcc
 CFLAGS  = -Wall -Wextra -O2 -std=gnu11
 

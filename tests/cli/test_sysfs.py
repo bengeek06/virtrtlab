@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 """
 test_sysfs.py — unit tests for sysfs CRUD commands.
 

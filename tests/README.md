@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+
 # Test strategy
 
 All automated validation lives under `tests/` so local runs and GitHub Actions use the same layout, fixtures, and reporting.

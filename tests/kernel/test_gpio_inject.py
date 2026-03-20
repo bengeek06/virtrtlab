@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 """
 test_gpio_inject.py — dedicated inject mechanism tests for virtrtlab_gpio v0.2.0.
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 """
 test_uart_wire.py — data-plane integration tests for virtrtlab_uart wire device.
 

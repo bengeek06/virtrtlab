@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 """
 conftest.py — shared fixtures for VirtRTLab daemon integration tests.
 
