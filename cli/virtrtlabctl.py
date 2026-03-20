@@ -659,6 +659,57 @@ def cmd_reset(args: argparse.Namespace) -> int:
     return 0
 
 
+def _valid_line(s: str) -> int:
+    try:
+        v = int(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"line must be an integer, got {s!r}")
+    if not 0 <= v <= 7:
+        raise argparse.ArgumentTypeError(f"line must be 0..7, got {v}")
+    return v
+
+
+def _valid_value(s: str) -> int:
+    try:
+        v = int(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"value must be 0 or 1, got {s!r}")
+    if v not in (0, 1):
+        raise argparse.ArgumentTypeError(f"value must be 0 or 1, got {v}")
+    return v
+
+
+def cmd_inject(args: argparse.Namespace) -> int:
+    device: str = args.device
+    line: int = args.line
+    value: int = args.value
+
+    device_path = Path(SYSFS_ROOT) / "devices" / device
+    if not device_path.is_dir():
+        raise VirtrtlabError(
+            f"device not found: {device} (is the module loaded?)", exit_code=4
+        )
+
+    inject_path = device_path / "inject"
+    if not inject_path.exists():
+        raise VirtrtlabError(
+            f"{device} does not support injection (no 'inject' attribute)", exit_code=4
+        )
+
+    try:
+        inject_path.write_text(f"{line}:{value}")
+    except OSError as exc:
+        raise VirtrtlabError(
+            f"kernel rejected inject on {device} line {line}: {exc.strerror}", exit_code=4
+        ) from exc
+
+    if args.json:
+        _emit({"device": device, "line": line, "value": value, "status": "ok"}, True)
+    else:
+        print(f"{device} line {line} ← {value}")
+    return 0
+
+
 def cmd_daemon(args: argparse.Namespace) -> int:
     subcmd: str = args.daemon_command
     no_sudo: bool = args.no_sudo
@@ -772,6 +823,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p_reset = sub.add_parser("reset", help="Reset stats counters")
     p_reset.add_argument("device", help="Device name")
     p_reset.set_defaults(func=cmd_reset)
+
+    # inject
+    p_inject = sub.add_parser("inject", help="Inject a GPIO line value")
+    p_inject.add_argument("device", help="GPIO device name (e.g. gpio0)")
+    p_inject.add_argument(
+        "line", type=_valid_line, metavar="LINE",
+        help="GPIO line index (0..7)",
+    )
+    p_inject.add_argument(
+        "value", type=_valid_value, metavar="VALUE",
+        help="Physical value to inject (0 or 1)",
+    )
+    p_inject.set_defaults(func=cmd_inject)
 
     # daemon
     p_daemon = sub.add_parser("daemon", help="Manage virtrtlabd independently")
