@@ -157,6 +157,8 @@ install: _check_root all
 	udevadm control --reload-rules
 	udevadm trigger
 	install -m 644 install/virtrtlab.service $(SYSDDIR)/virtrtlab.service
+	printf '%s\n' virtrtlab_core virtrtlab_uart virtrtlab_gpio \
+	    > /etc/modules-load.d/virtrtlab.conf
 	getent group  virtrtlab >/dev/null 2>&1 || groupadd --system virtrtlab
 	getent passwd virtrtlab >/dev/null 2>&1 || \
 	    useradd --system --gid virtrtlab --no-create-home \
@@ -190,6 +192,7 @@ uninstall: _check_root
 	      $(MODDIR)/virtrtlab_gpio.ko
 	-rmdir $(MODDIR) 2>/dev/null || true
 	-depmod -a 2>/dev/null || true
+	rm -f /etc/modules-load.d/virtrtlab.conf
 	rm -f $(SUDOERS)/virtrtlab-dev
 	-userdel  virtrtlab 2>/dev/null || true
 	-groupdel virtrtlab 2>/dev/null || true
