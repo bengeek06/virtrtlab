@@ -125,6 +125,7 @@ AUT integration contract: [docs/device-contract.md](docs/device-contract.md).
 |-- docs/
 |   |-- README.md
 |   |-- device-contract.md
+|   |-- privilege-model.md
 |   |-- socket-api.md
 |   `-- sysfs.md
 |-- daemon/
@@ -262,6 +263,7 @@ socat - UNIX-CONNECT:/run/virtrtlab/uart0.sock
 ## 5) CLI conventions (`virtrtlabctl`)
 
 Full contract: [`docs/virtrtlabctl.md`](docs/virtrtlabctl.md).
+Privilege model: [docs/privilege-model.md](docs/privilege-model.md).
 
 Command structure:
 
@@ -332,6 +334,23 @@ If the host also exposes the legacy `/sys/class/gpio` ABI, `virtrtlabctl up`
 additionally exports `VIRTRTLAB_GPIOBASE<N>`.
 
 Full contract: [docs/device-contract.md](docs/device-contract.md).
+
+### Privilege model
+
+Installed VirtRTLab systems use a least-privilege model. The normative contract
+is defined in [docs/privilege-model.md](docs/privilege-model.md); the summary is:
+
+- users join group `virtrtlab` for day-to-day CLI, sysfs, and `/dev/` access
+- routine AUT and harness usage must not require interactive `sudo`
+- installation and other machine-wide integration steps remain root-only
+- the normal install profile and the development/CI profile are distinct
+
+Post-install setup for human users:
+
+```sh
+sudo usermod -aG virtrtlab $USER
+newgrp virtrtlab
+```
 
 Exit codes:
   - `0` success
