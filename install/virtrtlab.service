@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# VirtRTLab daemon systemd unit
+# installed by: make install
+
+[Unit]
+Description=VirtRTLab device simulation daemon
+After=systemd-modules-load.service
+Requires=systemd-modules-load.service
+
+[Service]
+Type=simple
+User=virtrtlab
+Group=virtrtlab
+# Fix group ownership on virtual misc devices — udevadm trigger --action=add
+# does not work for kernel virtual devices (no sysfs uevent to replay).
+ExecStartPre=+/bin/sh -c 'chgrp virtrtlab /dev/virtrtlab-wire* /dev/ttyVIRTLAB* 2>/dev/null; chmod 0660 /dev/virtrtlab-wire* /dev/ttyVIRTLAB* 2>/dev/null; exit 0'
+ExecStart=/usr/local/bin/virtrtlabd
+AmbientCapabilities=CAP_SYS_MODULE
+CapabilityBoundingSet=CAP_SYS_MODULE
+RuntimeDirectory=virtrtlab
+RuntimeDirectoryMode=0750
+UMask=0007
+
+[Install]
+WantedBy=multi-user.target

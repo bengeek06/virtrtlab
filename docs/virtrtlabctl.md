@@ -14,9 +14,17 @@ contracts focused.
 3. **Daemon lifecycle** — start, stop, and query `virtrtlabd` independently of module loading
 
 `virtrtlabctl` is implemented in **Python 3.11+** (stdlib only). It operates by reading
-and writing sysfs files (`/sys/kernel/virtrtlab/`) and forking `virtrtlabd` as a child
-process. It does **not** open the daemon sockets (`uart<N>.sock`) — those are reserved
-for simulators.
+and writing sysfs files (`/sys/kernel/virtrtlab/`) and by invoking the configured
+privilege path for module lifecycle and daemon control. In the normal installed
+profile this means service-mediated operations; in the development profile this
+may mean direct allowlisted process launches. It does **not** open the daemon
+sockets (`uart<N>.sock`) — those are reserved for simulators.
+
+Installed-system privilege expectations are defined in
+[privilege-model.md](privilege-model.md). In the target v1 deployment model, a
+user in group `virtrtlab` can perform routine CLI operations without interactive
+`sudo`; privileged module-management transitions are mediated by the installed
+service profile or by the development/CI profile.
 
 ---
 
@@ -29,7 +37,7 @@ virtrtlabctl [--json] [--no-sudo] <command> [<subcommand>] [<args>]
 | Global flag | Description |
 |-------------|-------------|
 | `--json` | Switch all output to machine-readable JSON (see [Output format](#output-format)) |
-| `--no-sudo` | Do not prepend `sudo` to privileged operations (`insmod`, `rmmod`, `virtrtlabd`). Use when the caller already has the required capabilities (e.g. root shell, CI container) |
+| `--no-sudo` | Do not prepend `sudo` to privileged operations on the direct development path (`insmod`, `rmmod`, direct `virtrtlabd` launch). Use when the caller already has the required privilege path (e.g. installed service mediation, development sudoers profile, root shell, CI container) |
 
 ### `up` — bring up a lab profile
 
@@ -45,11 +53,20 @@ Steps performed in order:
 
 1. Resolve the lab profile (see [Lab profile](#lab-profile)).
 2. For each device type in the profile (in declaration order):
-   - Run `insmod <module>.ko <param>=<count>` as root if the module is not already loaded.
-   - On failure: unload already-loaded modules in reverse order, exit `1`.
-3. Start `virtrtlabd --num-uarts <N> --run-dir /run/virtrtlab` as root in the background.
-   Write the daemon PID to `/run/virtrtlab/daemon.pid`.
-   Write the ordered list of loaded modules to `/run/virtrtlab/modules.list`.
+  - Request module activation through the configured privilege path.
+  - Normal installed profile: use the installed service mediation path.
+  - Development profile: run `insmod <module>.ko <param>=<count>` through the
+    targeted allowlist or an already-privileged shell if the module is not
+    already loaded.
+  - On failure: roll back already-activated modules in reverse order, exit `1`.
+3. Activate `virtrtlabd` through the configured privilege path.
+  - Normal installed profile: request daemon/service mediation according to
+    [privilege-model.md](privilege-model.md).
+  - Development profile: launch `virtrtlabd --num-uarts <N> --run-dir /run/virtrtlab`
+    through the targeted allowlist or an already-privileged shell.
+  The active path must ensure the daemon PID is recorded at
+  `/run/virtrtlab/daemon.pid` and the ordered list of loaded modules is recorded
+  at `/run/virtrtlab/modules.list`.
 4. Poll for the appearance of **all** expected sockets (`uart0.sock` … `uart<N-1>.sock`)
    for up to 5 seconds. Exit `3` on timeout. Waiting for all sockets is required: a
    test connecting to `uart1.sock` immediately after `up` returns must not race against
@@ -82,14 +99,17 @@ for GPIO devices and omits `VIRTRTLAB_GPIOBASE<N>` with a warning.
 virtrtlabctl down
 ```
 
-Stops `virtrtlabd` (SIGTERM + wait up to 5 s, then SIGKILL), then runs `rmmod` in
-reverse module insertion order. Module list is read from `/run/virtrtlab/modules.list`
+Requests daemon shutdown and module teardown through the same configured
+privilege path used by `up`. On the direct development path, daemon shutdown is
+SIGTERM + wait up to 5 s, then SIGKILL, followed by `rmmod` in reverse module
+insertion order. Module list is read from `/run/virtrtlab/modules.list`
 (written by `up`).
 
-If `modules.list` is absent, `down` prints a warning to stderr and attempts `rmmod`
-on all known modules (`virtrtlab_gpio`, `virtrtlab_uart`, `virtrtlab_core`) in that
-order (reverse of the standard load order: core last). Exit `0` even if some modules were already unloaded; a missing module is not
-an error on teardown.
+If `modules.list` is absent, `down` prints a warning to stderr and attempts a
+best-effort teardown of all known modules (`virtrtlab_gpio`, `virtrtlab_uart`,
+`virtrtlab_core`) in that order on the direct development path. Exit `0` even
+if some modules were already unloaded; a missing module is not an error on
+teardown.
 
 ### `status` — global lab status
 
@@ -225,12 +245,15 @@ virtrtlabctl daemon stop
 virtrtlabctl daemon status
 ```
 
-`daemon start` launches `virtrtlabd` as root (via `sudo` unless `--no-sudo`) in the
-background and writes the PID to `/run/virtrtlab/daemon.pid`. Fails with exit `3` if
-a daemon is already running (pid-file exists and process is alive).
+`daemon start` activates `virtrtlabd` through the configured privilege path. In the
+normal installed profile this means the installed service path; in the development
+profile this may mean a direct background launch via `sudo` unless `--no-sudo`.
+The active path writes the PID to `/run/virtrtlab/daemon.pid`. Fails with exit `3`
+if a daemon is already running (pid-file exists and process is alive).
 
-`daemon stop` sends SIGTERM to the recorded PID, waits up to 5 s for the process to
-exit, then sends SIGKILL if still running.
+`daemon stop` requests daemon shutdown through the same configured privilege path,
+then waits up to 5 s for the recorded process to exit and escalates to SIGKILL on
+the direct development path if still running.
 
 `daemon status` prints daemon PID and running state. Exit `3` if not running.
 
@@ -407,10 +430,11 @@ write-only by spec (returns `-EPERM` on read). The value `0` is the documented t
 `reset` to the bus `state` attribute, which is intentionally a separate, more
 destructive operation.
 
-**`sudo` automatic by default** — `virtrtlabctl` prepends `sudo` to all privileged
-operations (`insmod`, `rmmod`, `virtrtlabd start`). This matches the UX of common
-system tools. `--no-sudo` disables it for callers that already hold the required
-capabilities (root shell, CI container with `CAP_SYS_MODULE`).
+**Installed profile and development profile stay distinct** — in the normal
+installed profile, `virtrtlabctl` relies on service-mediated privilege handling.
+In the development profile, it may prepend `sudo` to direct privileged operations
+such as `insmod`, `rmmod`, and direct `virtrtlabd` launch. `--no-sudo` disables
+that direct-path behaviour for callers that already hold the required privileges.
 
 **`module_dir` in `[build]`** — out-of-tree development is the primary use case during
 v0.1.0; requiring `make install` before `virtrtlabctl up` would block fast iteration.
