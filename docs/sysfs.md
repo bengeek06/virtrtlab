@@ -56,13 +56,13 @@ When `state` is set to `down` and the wire device is not open: pending TX bytes 
 
 > **Fault injection direction (v0.1.0)**: the common fault attrs apply to the **AUT-driven transmit path** for UART and to the **sysfs-injected input-transition path** for GPIO. They do not mutate simulator → AUT UART traffic or AUT-driven GPIO output transitions in `v0.1.0`.
 
-> **Transfer unit definition (v0.1.0)**: transfer-unit granularity is peripheral-specific. For UART, one transfer unit is one byte paced by the hrtimer. For GPIO, one transfer unit is one sysfs write to `value`, potentially affecting multiple bits of the same bank.
+> **Transfer unit definition (v0.1.0)**: transfer-unit granularity is peripheral-specific. For UART, one transfer unit is one byte paced by the hrtimer. For GPIO, one transfer unit is one sysfs write to `inject`, targeting a single line transition.
 
 > **`latency_ns` / `jitter_ns` semantics**: delivery timing is peripheral-specific. For UART, these attrs delay byte delivery toward the wire device and therefore influence TX backpressure. For GPIO, they delay sysfs-injected input transitions before the logical line state changes; see the GPIO section below.
 
-> **Fault attr update timing**: writes to `latency_ns`, `jitter_ns`, `drop_rate_ppm`, or `bitflip_rate_ppm` take effect from the **next transfer scheduling point** after the sysfs store returns. For UART, that means the next hrtimer callback; for GPIO, the next sysfs write to `value`. No already-scheduled transfer unit is modified in place.
+> **Fault attr update timing**: writes to `latency_ns`, `jitter_ns`, `drop_rate_ppm`, or `bitflip_rate_ppm` take effect from the **next transfer scheduling point** after the sysfs store returns. For UART, that means the next hrtimer callback; for GPIO, the next sysfs write to `inject`. No already-scheduled transfer unit is modified in place.
 
-> **GPIO delayed-write snapshot rule**: when a GPIO `value` write is accepted for delayed delivery, the kernel snapshots the requested logical bank value together with the current `latency_ns`, `jitter_ns`, `drop_rate_ppm`, `bitflip_rate_ppm`, `direction`, and `active_low` state before the sysfs store returns. A later change to those attrs does not rewrite a bank update that was already accepted and scheduled.
+> **GPIO delayed-write snapshot rule**: when a GPIO `inject` write is accepted for delayed delivery, the kernel snapshots the requested line index, requested physical value, and current `latency_ns`, `jitter_ns`, `drop_rate_ppm`, and `bitflip_rate_ppm` state before the sysfs store returns. A later change to those attrs does not rewrite a transition that was already accepted and scheduled.
 
 > **`enabled=false` vs `state=down`**: both halt data flow immediately and drain pending TX bytes into `stats/drops`. The difference is scope (`enabled` is per-device; `state` is per-bus) and reset behaviour (`state=reset` restores `enabled=1` on all devices; writing `enabled` only affects the target device). When `state=down` is set, `enabled` values are preserved unchanged and take effect again after `state=up`.
 
@@ -94,7 +94,7 @@ These attributes **reflect** the current termios state set by the AUT via `tcset
 | `tx_buf_sz` | rw | u32 | `4096` | Must be a power of two; 64 ≤ value ≤ 65536. Non-power-of-two writes return `-EINVAL`. Read back the attr after writing to confirm the accepted value. |
 | `rx_buf_sz` | rw | u32 | `4096` | Must be a power of two; 64 ≤ value ≤ 65536. Non-power-of-two writes return `-EINVAL`. Read back the attr after writing to confirm the accepted value. |
 
-Writes take effect on the **next** open of `/dev/ttyVIRTLABx` (not live-resizable while open; deferred to v0.2.0).
+Writes take effect on the **next** open of `/dev/ttyVIRTLABx` (not live-resizable while open; deferred to a later revision).
 
 > **TX vs RX overflow semantics**: the TX buffer (AUT → wire device) applies **backpressure** — it never evicts bytes; `write()` blocks or returns `-EAGAIN`. The RX buffer (wire device → AUT) applies **overflow-drop** — oldest byte evicted on full, `stats/overruns` incremented.
 
@@ -131,24 +131,26 @@ Counters are reset by writing `0` to `stats/reset`. Counters wrap silently at `U
 
 ## Devices — GPIO (`gpio0`, `gpio1`, …)
 
-> **v0.2.0** — replaces the v0.1.0 custom banked GPIO model. `virtrtlab_gpio` now
-> registers a native `gpio_chip` via `gpiochip_add_data()`, exposing `/dev/gpiochipN` to
-> the AUT. Fault injection is applied on the harness injection path via the `inject` sysfs
-> attr. The custom `direction`, `value`, `active_low`, `edge_rising`, and `edge_falling`
-> sysfs attrs are **retired**. No dependency on `gpio-sim` or any out-of-tree kernel patch.
+`virtrtlab_gpio` registers a native `gpio_chip` via `gpiochip_add_data()`, exposing
+`/dev/gpiochipN` to the AUT. Fault injection is applied on the harness injection
+path via the `inject` sysfs attr. The earlier custom `direction`, `value`,
+`active_low`, `edge_rising`, and `edge_falling` sysfs attrs are **retired**.
+No dependency on `gpio-sim` or any out-of-tree kernel patch.
 
 ### Overview
 
 `virtrtlab_gpio` registers a native `gpio_chip` via `gpiochip_add_data()` on module
 load. The chip is visible to the AUT via `/dev/gpiochipN` using the standard GPIO v2
-character device API. Fault injection (latency, jitter, drop, bitflip) is applied on
-every harness-injected input transition, before the new line state reaches the AUT.
+character device API. Legacy AUTs using `/sys/class/gpio` remain supported through the
+standard Linux GPIO sysfs ABI, with a dynamically assigned base number exported by
+VirtRTLab. Fault injection (latency, jitter, drop, bitflip) is applied on every
+harness-injected input transition, before the new line state reaches the AUT.
 
-Two distinct control planes exist:
+Three distinct surfaces exist:
 
 - **AUT interface**: `/dev/gpiochipN` — standard GPIO v2 character device API
-- **Harness control plane**: `/sys/kernel/virtrtlab/devices/gpioN/` — `inject` attr for
-  line-state injection, fault attrs, and stats
+- **AUT interface (legacy)**: `/sys/class/gpio/gpio<base+L>/` — standard Linux sysfs GPIO ABI
+- **Harness control plane**: `/sys/kernel/virtrtlab/devices/gpioN/` — `inject` attr for line-state injection, fault attrs, and stats
 
 ### Device provisioning
 
@@ -161,17 +163,27 @@ The gpiochip index `N` is assigned dynamically by gpiolib; the resulting `/dev/g
 path is exposed via the `chip_path` sysfs attr so harness scripts can locate the correct
 device without scanning all gpiochips.
 
+The legacy sysfs GPIO base is assigned dynamically by gpiolib as well. VirtRTLab
+exposes that base via the `sysfs_base` attr so legacy AUTs and harnesses can
+derive line paths without probing unrelated gpiochips.
+
+If the host kernel does not provide the legacy `/sys/class/gpio` ABI, `sysfs_base`
+is absent and the GPIO bank remains usable through `/dev/gpiochipN` and the
+VirtRTLab harness control plane.
+
 `virtrtlab_gpio` declares `softdep: pre: virtrtlab_core` only. No dependency on
 `gpio-sim` or any out-of-tree module.
 
-### AUT interface
+### AUT interfaces
 
-The AUT communicates with the simulated GPIO chip exclusively via the **GPIO v2
-character device API** on `/dev/gpiochipN`:
+#### GPIO v2 character device API
+
+The AUT may communicate with the simulated GPIO chip via the **GPIO v2 character
+device API** on `/dev/gpiochipN`:
 
 | AUT operation | ioctl / syscall | Description |
 |---|---|---|
-| Identify chip | `GPIO_GET_CHIPINFO_IOCTL` | Returns label `"virtrtlab-gpio0"`, name, and line count |
+| Identify chip | `GPIO_GET_CHIPINFO_IOCTL` | Returns the host-assigned chip name, label `"gpioN"`, and line count |
 | Request lines | `GPIO_V2_GET_LINE_IOCTL` | Allocate one or more lines with direction, edge-detection, bias, and active-low flags |
 | Read line values | `GPIO_V2_LINE_GET_VALUES_IOCTL` | Read current logical value of requested lines |
 | Drive output lines | `GPIO_V2_LINE_SET_VALUES_IOCTL` | Write output line state |
@@ -183,9 +195,26 @@ and active-low polarity are **all set by the AUT at line-request time** via `ioc
 flags. VirtRTLab does not expose `direction`, `active_low`, or edge masks in sysfs.
 
 `ioctl(fd, GPIO_GET_CHIPINFO_IOCTL)` returns:
-- `name`: `"virtrtlab-gpio0"` (or `"virtrtlab-gpioN"`)
-- `label`: same as name
+- `name`: the host-assigned gpiochip device name (for example `gpiochip4`)
+- `label`: `"gpioN"` for the matching VirtRTLab instance
 - `lines`: `num_lines` (default 8)
+
+#### Legacy sysfs GPIO ABI
+
+The AUT may also communicate with the simulated GPIO chip through the legacy
+`/sys/class/gpio` ABI.
+
+Mapping rule:
+
+- `sysfs_base` is the first global GPIO number assigned to this `gpioN` bank
+- line offset `L` (`0..7`) is exposed as `/sys/class/gpio/gpio<sysfs_base+L>/`
+
+Example: if `sysfs_base` is `200`, line `3` of `gpio0` is exposed as
+`/sys/class/gpio/gpio203/`.
+
+VirtRTLab does not define a private sysfs ABI for AUT line access; it reuses the
+standard Linux GPIO sysfs files (`direction`, `value`, `edge`, `active_low`) when
+that ABI is enabled by the host kernel.
 
 ### Harness control plane — VirtRTLab sysfs
 
@@ -197,8 +226,9 @@ flags. VirtRTLab does not expose `direction`, `active_low`, or edge masks in sys
 |---|---|---|---|
 | `type` | ro | string | `"gpio"` |
 | `bus` | ro | string | Parent bus, e.g. `vrtlbus0` |
-| `num_lines` | ro | u8 | Number of lines on this chip. Fixed at `8` per instance in v0.2.0. |
-| `chip_path` | ro | string | Absolute path to the AUT-facing character device, e.g. `/dev/gpiochip2`. Derived from `gc.base` at `gpiochip_add_data()` time. |
+| `num_lines` | ro | u8 | Number of lines on this chip. Fixed at `8` per instance. |
+| `chip_path` | ro | string | Absolute path to the AUT-facing character device, e.g. `/dev/gpiochip2`. Derived from the registered gpiochip device name at `gpiochip_add_data()` time. |
+| `sysfs_base` | ro | u32 | First global GPIO number assigned to this bank for the legacy `/sys/class/gpio` ABI. Line `L` maps to `gpio<sysfs_base+L>`. Attribute may be absent when the host kernel disables the legacy ABI. |
 | `inject` | wo | string | `"N:V"` — inject value `V` (`0` or `1`) on input line `N` (`0`..`7`). Triggers the 7-step fault injection shim. Writes to AUT-owned output lines are silently ignored at commit time (step 6). `read()` returns `-EPERM`. |
 
 #### Fault attrs
@@ -262,7 +292,7 @@ before the new state reaches the AUT:
 PRNG draws use the bus-level xorshift32 PRNG (`buses/vrtlbus0/seed`). Draw order across
 devices on the same bus is the same interleaved order as for UART.
 
-### Transfer unit (v0.2.0)
+### Transfer unit
 
 For GPIO, one transfer unit = **one write to the `inject` sysfs attr**. The transfer unit
 is evaluated once per write, independent of whether the requested
@@ -280,7 +310,7 @@ if a future API allows multi-line atomic writes, each line is evaluated independ
 |---|---|---|
 | `value_changes` | u64 | Count of line transitions actually committed to the AUT-facing line state (input lines only). Increments only when the new state differs from the previous state. |
 | `drops` | u64 | Count of harness-injected transitions suppressed by `drop_rate_ppm`. One increment per suppressed write (per transfer unit). |
-| `bitflips` | u64 | Count of bitflip gate fires: increments whenever `bitflip_rate_ppm` inverts the injected value, regardless of line direction. New in v0.2.0. |
+| `bitflips` | u64 | Count of bitflip gate fires: increments whenever `bitflip_rate_ppm` inverts the injected value, regardless of line direction. |
 | `reset` | wo | Writing `0` resets all GPIO stats counters atomically. Any other value returns `-EINVAL`. `read()` returns `-EPERM`. |
 
 Counters wrap silently at `UINT64_MAX` (modular arithmetic, no saturation). Bus
@@ -304,7 +334,7 @@ UART); it does **not** affect line state or the AUT's open line descriptors.
 | `read()` on `inject` | permission error (write-only attr, mode `0200`) |
 | `inject` write while `enabled=0` | return `count` (success); injection silently discarded, line state unchanged |
 | `inject` write while bus `state=down` | return `-EIO` |
-| `inject` write on line currently owned by AUT as output | write returns `0` (success); the injection is accepted, goes through drop/bitflip/latency stages, but commits to the stored line value only — the AUT's `GPIO_V2_LINE_SET_VALUES_IOCTL` remains authoritative for the output state |
+| `inject` write on line currently owned by AUT as output | write returns `count` (success); the injection is accepted, goes through drop/bitflip/latency stages, but commits to the stored line value only — the AUT's `GPIO_V2_LINE_SET_VALUES_IOCTL` remains authoritative for the output state |
 | `read()` on `stats/reset` | return `-EPERM` |
 | `stats/reset` write value other than `0` | return `-EINVAL` |
 | `latency_ns`/`jitter_ns` write > 10 000 000 000 ns | return `-EINVAL` |
@@ -348,11 +378,9 @@ NOTIFY_PID=$!
 echo 0:1 > /sys/kernel/virtrtlab/devices/gpio0/inject
 # Edge event arrives ~5 ms after the write above
 wait $NOTIFY_PID
-cat /sys/kernel/virtrtlab/devices/gpio0/stats/edge_events
-# Expected output: 1
 ```
 
-### Decisions (v0.2.0)
+### Decisions
 
 **Open 1 — Harness injection surface** → **closed**: `inject` sysfs attr at
 `/sys/kernel/virtrtlab/devices/gpioN/inject`, format `"N:V"`. Provides a stable,
@@ -364,22 +392,23 @@ before committing the line value via `gpiochip_set_value_cansleep()`. All code u
 public gpiolib APIs only; no in-tree patch required.
 
 **Open 3 — Stable `/dev` path** → **closed**: `chip_path` sysfs attr is the primary
-discovery mechanism. Derived from `gc.base` at `gpiochip_add_data()` time and exposed
-read-only at `/sys/kernel/virtrtlab/devices/gpioN/chip_path`. No udev symlink required.
+discovery mechanism. Derived from the registered gpiochip device name at
+`gpiochip_add_data()` time and exposed read-only at
+`/sys/kernel/virtrtlab/devices/gpioN/chip_path`. No udev symlink required.
 
-**Open 4 — `bus state=down` semantics for GPIO** → **deferred to v0.3.0**: `state=down`
-is not propagated to the GPIO device in v0.2.0. `inject` writes while bus is `down`
+**Open 4 — `bus state=down` semantics for GPIO** → **deferred**: `state=down`
+is not propagated to the GPIO device in the current spec. `inject` writes while bus is `down`
 return `-EIO` (bus gate enforced in `inject_store()`). The AUT's open line fds are
-unaffected by bus state in v0.2.0.
+unaffected by bus state.
 
 **Open 5 — `num_lines` configurability** → **closed**: fixed at 8 per instance in
-v0.2.0. Exposed read-only via the `num_lines` sysfs attr. Configurable bank widths
-deferred to v0.3.0.
+the current spec. Exposed read-only via the `num_lines` sysfs attr. Configurable bank widths
+are deferred to a later revision.
 
 **Open 6 — `active_low` read-back** → **closed (not exposed)**: the harness writes
 physical values; the AUT controls polarity via its `GPIO_V2_GET_LINE_IOCTL` flags.
 Exposing `active_low` from gpiolib internal state would require non-public API access and
-is not needed in v0.2.0.
+is not needed in the current spec.
 
 ## Rationale
 
@@ -389,15 +418,18 @@ The AUT configures the serial line via `tcsetattr()` — this is the standard PO
 **Why no `mode` or `fault_policy` in sysfs?**  
 Record/replay and named fault profiles are orchestration concepts. They are cleaner to implement in Python scripts that write individual sysfs attrs, rather than encoding policy state in the kernel. This keeps the kernel surface minimal and auditable.
 
-**Why replace the v0.1.0 custom banked GPIO with a native `gpio_chip` (v0.2.0)?**  
-The v0.1.0 implementation provided no standard AUT interface: a userspace AUT using `libgpiod` or the GPIO v2 ioctl API could not interact with it. VirtRTLab's purpose is to simulate real hardware the AUT has been compiled against; a private sysfs-only bank model defeats this goal. Registering a native `struct gpio_chip` via `gpiochip_add_data()` exposes a standards-compliant `/dev/gpiochipN` char device using only public kernel API — no out-of-tree dependency, no `CONFIG_GPIO_SIM`, no configfs/debugfs bootstrap required.
+**Why use a native `gpio_chip`?**
+The earlier custom banked GPIO model provided no standard AUT interface: a userspace AUT using `libgpiod` or the GPIO v2 ioctl API could not interact with it. VirtRTLab's purpose is to simulate real hardware the AUT has been compiled against; a private sysfs-only bank model defeats this goal. Registering a native `struct gpio_chip` via `gpiochip_add_data()` exposes a standards-compliant `/dev/gpiochipN` char device using only public kernel API — no out-of-tree dependency, no `CONFIG_GPIO_SIM`, no configfs/debugfs bootstrap required.
 
-**Why keep VirtRTLab sysfs for fault control (v0.2.0)?**  
+**Why keep legacy `/sys/class/gpio` support as well?**
+Some existing AUTs still use the legacy sysfs GPIO ABI. VirtRTLab cannot require those adopters to rewrite their GPIO stack solely to run CI against the simulator. The stable contract is therefore dual-surface: GPIO chardev for modern users, `/sys/class/gpio` for legacy users, and VirtRTLab sysfs only for harness control.
+
+**Why keep VirtRTLab sysfs for fault control?**
 Fault injection parameters are dynamic: CI test scripts change them at runtime between test cases. The native `gpio_chip` API has no built-in runtime harness surface. VirtRTLab sysfs attrs (`inject`, `latency_ns`, `drop_rate_ppm`, etc.) remain the correct layer for runtime harness control.
 
 ## Decisions
 
-**Buffer live-resize** — deferred to v0.2.0: `tx_buf_sz`/`rx_buf_sz` writes rejected while device is open (`-EBUSY`).
+**Buffer live-resize** — deferred to a later revision: `tx_buf_sz`/`rx_buf_sz` writes rejected while device is open (`-EBUSY`).
 
 **Baud rate change notification** — not in v0.1.0: `tcsetattr()` updates termios state and the sysfs `baud` attr atomically. `virtrtlabd` reads `baud` from sysfs on demand; no uevent or control byte is generated by the kernel.
 
@@ -407,8 +439,8 @@ Fault injection parameters are dynamic: CI test scripts change them at runtime b
 - After `rmmod`/`insmod`, the fault injection sequence is identical to the previous load if `seed` is not written — deterministic by default.
 - After `state=reset`, the next fault draw continues from wherever the PRNG left off. If test reproducibility requires a known sequence across resets, write `seed` explicitly after each `state=reset`.
 
-**GPIO line count** — fixed at 8 lines per `gpioN` instance in v0.2.0. `num_lines` is read-only in sysfs and reflects this fixed value. Configurability is deferred to a later version.
+**GPIO line count** — fixed at 8 lines per `gpioN` instance. `num_lines` is read-only in sysfs and reflects this fixed value. Configurability is deferred to a later revision.
 
-**GPIO transfer unit** — changed from bank-write (v0.1.0) to per-line-write (v0.2.0) to align with the GPIO v2 API's per-line granularity and the `inject` attr's `"N:V"` format. `drop_rate_ppm` and `bitflip_rate_ppm` are now evaluated independently for each line write.
+**GPIO transfer unit** — defined as one write to `inject` targeting a single line, aligning with the GPIO v2 API's per-line granularity and the `inject` attr's `"N:V"` format. `drop_rate_ppm` and `bitflip_rate_ppm` are evaluated independently for each line write.
 
-**`stats/bitflips` counter** — added in v0.2.0. In v0.1.0, bitflips were subsumed in `stats/value_changes`. Separating them allows test assertions to distinguish intended transitions (AUT response to correct injection) from corruption events (bitflip gate fired).
+**`stats/bitflips` counter** — tracked separately from `stats/value_changes` so test assertions can distinguish intended transitions (AUT response to correct injection) from corruption events (bitflip gate fired).
