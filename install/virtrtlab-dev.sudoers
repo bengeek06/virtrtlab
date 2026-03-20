@@ -1,0 +1,11 @@
+# VirtRTLab — allow group members to load/unload modules without password
+# Used by kernel test suite (insmod/rmmod directly, without daemon)
+# installed by: make install-dev  (NOT make install)
+
+%virtrtlab ALL=(root) NOPASSWD: /sbin/modprobe virtrtlab_core
+%virtrtlab ALL=(root) NOPASSWD: /sbin/modprobe virtrtlab_uart
+%virtrtlab ALL=(root) NOPASSWD: /sbin/modprobe virtrtlab_gpio
+%virtrtlab ALL=(root) NOPASSWD: /sbin/rmmod virtrtlab_core
+%virtrtlab ALL=(root) NOPASSWD: /sbin/rmmod virtrtlab_uart
+%virtrtlab ALL=(root) NOPASSWD: /sbin/rmmod virtrtlab_gpio
+%virtrtlab ALL=(root) NOPASSWD: /usr/sbin/dmesg

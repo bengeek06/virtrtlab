@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# VirtRTLab daemon systemd unit
+# installed by: make install
+
+[Unit]
+Description=VirtRTLab device simulation daemon
+After=network.target
+
+[Service]
+Type=simple
+User=virtrtlab
+Group=virtrtlab
+ExecStart=/usr/local/bin/virtrtlabd
+AmbientCapabilities=CAP_SYS_MODULE
+CapabilityBoundingSet=CAP_SYS_MODULE
+RuntimeDirectory=virtrtlab
+RuntimeDirectoryMode=0750
+UMask=0007
+
+[Install]
+WantedBy=multi-user.target

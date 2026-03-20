@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: MIT
+# VirtRTLab CLI — project metadata
+# No build backend: virtrtlabctl.py is a standalone script installed directly.
+# This file exists to track Python dependencies and tooling configuration.
+
+[project]
+name            = "virtrtlabctl"
+version         = "0.1.0"
+description     = "VirtRTLab control CLI"
+readme          = "README.md"
+license         = { text = "MIT" }
+requires-python = ">=3.11"
+
+# No runtime dependencies — stdlib only:
+#   argparse, pathlib, tomllib (stdlib since 3.11), subprocess, textwrap
+dependencies = []
+
+[tool.pytest.ini_options]
+# pytest is invoked from the repo root; CLI tests live in tests/cli/
+testpaths = ["../tests/cli"]

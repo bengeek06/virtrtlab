@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# VirtRTLab udev rules
+# installed by: make install
+# removed by:   make uninstall
+
+# VirtRTLab sysfs attributes — group-writable for members of virtrtlab
+SUBSYSTEM=="virtrtlab", GROUP="virtrtlab", MODE="0664"
+
+# VirtRTLab char devices (wire devices, GPIO chardev)
+KERNEL=="virtrtlab*", GROUP="virtrtlab", MODE="0660"
+
+# VirtRTLab UART AUT-facing TTY nodes
+KERNEL=="ttyVIRTLAB*", GROUP="virtrtlab", MODE="0660"
