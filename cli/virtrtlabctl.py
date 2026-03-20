@@ -366,6 +366,92 @@ def _modules_load_order(profile: dict) -> list[str]:
     return names
 
 
+def _resolve_aut_contract(profile: dict) -> list[dict]:
+    """Resolve the AUT integration contract for every device in the profile.
+
+    For UART devices the paths are derived deterministically from the instance
+    index (no sysfs read needed for the TTY path).
+
+    For GPIO devices, chip_path and sysfs_base are read from sysfs.  If
+    sysfs_base is absent (host kernel built without CONFIG_GPIO_SYSFS), the key
+    and its VIRTRTLAB_GPIOBASE<N> env var are silently omitted and a warning is
+    printed to stderr.
+
+    Returns a list of device contract dicts in profile declaration order.
+    """
+    contract: list[dict] = []
+    uart_idx = 0
+    gpio_idx = 0
+
+    for dev in profile["devices"]:
+        count: int = dev["count"]
+        dev_type: str = dev["type"]
+
+        if dev_type == "uart":
+            for i in range(count):
+                idx = uart_idx + i
+                aut_path = f"/dev/ttyVIRTLAB{idx}"
+                contract.append({
+                    "name": f"uart{idx}",
+                    "type": "uart",
+                    "aut_path": aut_path,
+                    "wire_path": f"/dev/virtrtlab-wire{idx}",
+                    "socket_path": f"{RUN_DIR}/uart{idx}.sock",
+                    "env": {
+                        f"VIRTRTLAB_UART{idx}": aut_path,
+                    },
+                })
+            uart_idx += count
+
+        elif dev_type == "gpio":
+            for i in range(count):
+                idx = gpio_idx + i
+                ctrl = f"{SYSFS_ROOT}/devices/gpio{idx}"
+                chip_path_file = Path(ctrl) / "chip_path"
+                sysfs_base_file = Path(ctrl) / "sysfs_base"
+
+                chip_path = ""
+                if chip_path_file.exists():
+                    try:
+                        chip_path = chip_path_file.read_text().strip()
+                    except OSError:
+                        pass
+
+                entry: dict = {
+                    "name": f"gpio{idx}",
+                    "type": "gpio",
+                    "chip_path": chip_path,
+                    "control_path": ctrl,
+                    "env": {
+                        f"VIRTRTLAB_GPIOCHIP{idx}": chip_path,
+                        f"VIRTRTLAB_GPIOCTRL{idx}": ctrl,
+                    },
+                }
+
+                if sysfs_base_file.exists():
+                    try:
+                        base = int(sysfs_base_file.read_text().strip())
+                        entry["sysfs_base"] = base
+                        entry["env"][f"VIRTRTLAB_GPIOBASE{idx}"] = str(base)
+                    except (OSError, ValueError):
+                        print(
+                            f"warning: gpio{idx}: sysfs_base unreadable, "
+                            f"omitting VIRTRTLAB_GPIOBASE{idx}",
+                            file=sys.stderr,
+                        )
+                else:
+                    print(
+                        f"warning: gpio{idx}: sysfs_base not available "
+                        f"(legacy /sys/class/gpio not supported by host kernel)",
+                        file=sys.stderr,
+                    )
+
+                contract.append(entry)
+            gpio_idx += count
+
+    return contract
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -439,13 +525,14 @@ def cmd_up(args: argparse.Namespace) -> int:
     if expected_socks:
         _poll_sockets(expected_socks)
 
+    # Resolve and emit the AUT integration contract
+    contract = _resolve_aut_contract(profile)
     if args.json:
-        _emit(
-            {"status": "up", "modules": all_mod_order, "sockets": [str(s) for s in expected_socks]},
-            True,
-        )
+        _emit({"devices": contract}, True)
     else:
-        print(f"lab up — modules: {', '.join(all_mod_order)}")
+        for entry in contract:
+            for var, val in entry["env"].items():
+                print(f"export {var}={val}")
     return 0
 
 
