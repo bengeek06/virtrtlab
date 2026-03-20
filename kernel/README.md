@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+
 # Kernel modules (stubs)
 
 This folder contains initial **out-of-tree** kernel module stubs for VirtRTLab.

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 """
 test_profile.py — unit tests for lab profile resolution.
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 """
 test_core_sysfs.py — sysfs contract tests for virtrtlab_core (issue #13).
 

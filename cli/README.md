@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+
 # CLI tooling
 
 The `v0.1.0` CLI target is split into two roles:

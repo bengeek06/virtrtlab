@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 """
 test_core_load.py — load/unload tests for virtrtlab_core.
 

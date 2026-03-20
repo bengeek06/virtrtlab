@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+
 # VirtRTLab
 
 VirtRTLab is a Linux/POSIX real-time testing framework based on **kernel modules** that simulate common peripherals on a **virtual bus**.
@@ -391,4 +393,8 @@ See `tests/README.md` for the repository-level test layout.
 
 ## License
 
-TBD
+Kernel modules in `kernel/` are licensed under [GPL-2.0-only](LICENSE).
+
+Userspace tools in `cli/`, `daemon/`, and Python tests in `tests/` are licensed under [MIT](LICENSE.MIT).
+
+Documentation in `README.md`, `docs/`, `cli/README.md`, `kernel/README.md`, and `tests/README.md` is licensed under [CC BY 4.0](LICENSE.CC-BY-4.0).

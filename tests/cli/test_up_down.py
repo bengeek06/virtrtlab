@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 """
 test_up_down.py — integration tests for cmd_up and cmd_down.
 

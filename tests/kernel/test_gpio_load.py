@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+
 """
 test_gpio_load.py — load/unload tests for virtrtlab_gpio.
 
