@@ -54,6 +54,10 @@ Steps performed in order:
    for up to 5 seconds. Exit `3` on timeout. Waiting for all sockets is required: a
    test connecting to `uart1.sock` immediately after `up` returns must not race against
    a partially-started daemon.
+5. Resolve and print the AUT integration contract for every loaded device. For UART,
+  this includes the AUT-facing TTY path. For GPIO, this includes the AUT-facing
+  gpiochip path, the legacy sysfs base number when available, and the VirtRTLab
+  control root.
 
 Options:
 
@@ -66,6 +70,11 @@ Options:
 Inline overrides (`--uart`, `--gpio`, …) take precedence over `--config`.
 If both a config file and inline overrides are present, the inline values replace
 the corresponding sections of the file profile; unmentioned device types come from the file.
+
+On success, `up` prints export hints suitable for direct copy/paste in a shell.
+The exact contract is defined in [device-contract.md](device-contract.md).
+If the host kernel does not expose legacy `/sys/class/gpio`, `up` still succeeds
+for GPIO devices and omits `VIRTRTLAB_GPIOBASE<N>` with a warning.
 
 ### `down` — tear down a lab
 
@@ -264,8 +273,8 @@ development case where modules are built in-tree without `make install`.
 
 | `type` in profile | Kernel module | `insmod` parameter |
 |---|---|---|
-| `uart` | `virtrtlab_uart.ko` | `num_uarts=<count>` |
-| `gpio` | `virtrtlab_gpio.ko` | `num_gpio=<count>` |
+| `uart` | `virtrtlab_uart.ko` | `num_uart_devices=<count>` |
+| `gpio` | `virtrtlab_gpio.ko` | `num_gpio_devs=<count>` |
 
 Any unknown `type` value causes `up` to fail immediately with exit `2` and a clear
 error message (`unknown device type: <type>`). SPI, ADC, DAC types are reserved for
@@ -330,6 +339,40 @@ Error example:
 ```json
 {"error": "kernel rejected write to latency_ns: Invalid argument", "code": 4}
 ```
+
+`up --json` example:
+
+```json
+{
+  "devices": [
+    {
+      "name": "uart0",
+      "type": "uart",
+      "aut_path": "/dev/ttyVIRTLAB0",
+      "wire_path": "/dev/virtrtlab-wire0",
+      "socket_path": "/run/virtrtlab/uart0.sock",
+      "env": {
+        "VIRTRTLAB_UART0": "/dev/ttyVIRTLAB0"
+      }
+    },
+    {
+      "name": "gpio0",
+      "type": "gpio",
+      "chip_path": "/dev/gpiochip4",
+      "sysfs_base": 200,
+      "control_path": "/sys/kernel/virtrtlab/devices/gpio0",
+      "env": {
+        "VIRTRTLAB_GPIOCHIP0": "/dev/gpiochip4",
+        "VIRTRTLAB_GPIOBASE0": "200",
+        "VIRTRTLAB_GPIOCTRL0": "/sys/kernel/virtrtlab/devices/gpio0"
+      }
+    }
+  ]
+}
+```
+
+If the host lacks the legacy GPIO sysfs ABI, `sysfs_base` is omitted and a
+warning is reported instead. This does not make `up` fail.
 
 ---
 

@@ -4,6 +4,8 @@
 
 Source of truth is the root [README.md](../README.md). This file keeps transport details focused.
 
+The AUT-facing device contract is defined separately in [device-contract.md](device-contract.md).
+
 ## Overview
 
 VirtRTLab uses two transport primitives:
@@ -12,6 +14,8 @@ VirtRTLab uses two transport primitives:
 |---|---|---|---|
 | Wire misc device | `/dev/virtrtlab-wireN` | kernel ↔ daemon | raw bytes |
 | Daemon socket | `/run/virtrtlab/uart0.sock` | daemon ↔ simulator | raw bytes |
+
+The AUT never opens `/dev/virtrtlab-wireN` directly; it opens `/dev/ttyVIRTLAB<N>`.
 
 Control operations (fault injection, configuration) are done via **sysfs** — not via the socket.
 

@@ -53,12 +53,15 @@ One core module + multiple peripheral modules:
 - Device instance: `<type><N>` (e.g. `uart0`, `gpio0`, `spi0`, `adc0`, `dac0`)
 - TTY device node: `/dev/ttyVIRTLAB<N>` (AUT-facing; N matches the device index)
 - Wire device node: `/dev/virtrtlab-wire<N>` (daemon-facing; N matches the device index)
+- GPIO chardev node: `/dev/gpiochip<M>` (AUT-facing; M assigned dynamically by gpiolib, discover via `chip_path` or `virtrtlabctl up`)
+- GPIO legacy sysfs lines: `/sys/class/gpio/gpio<base+L>/` (AUT-facing for legacy users; `base` discovered via `sysfs_base` or `virtrtlabctl up`)
+- GPIO control root: `/sys/kernel/virtrtlab/devices/gpio<N>/` (VirtRTLab-specific harness and CLI surface)
 - Daemon socket: `/run/virtrtlab/<type><N>.sock` (e.g. `uart0.sock`)
 
 ### Module parameters
 
-- `virtrtlab_uart`: `num_uarts` (int, default `1`, range `1..8`) — number of UART instances to register at load time. Instance indices are **0-based**: with `num_uarts=2`, instances are N=0 and N=1, producing `uart0`, `uart1`, `/dev/ttyVIRTLAB0`, `/dev/ttyVIRTLAB1`, `/dev/virtrtlab-wire0`, `/dev/virtrtlab-wire1`.
-- `virtrtlab_gpio`: `num_gpio_banks` (int, default `1`, range `1..32`) — number of GPIO bank instances to register at load time. Each `gpioN` instance models **one logical bank of 8 lines**. With `num_gpio_banks=2`, instances are `gpio0` and `gpio1`.
+- `virtrtlab_uart`: `num_uart_devices` (int, default `1`, range `1..4`) — number of UART instances to register at load time. Instance indices are **0-based**: with `num_uart_devices=2`, instances are N=0 and N=1, producing `uart0`, `uart1`, `/dev/ttyVIRTLAB0`, `/dev/ttyVIRTLAB1`, `/dev/virtrtlab-wire0`, `/dev/virtrtlab-wire1`.
+- `virtrtlab_gpio`: `num_gpio_devs` (int, default `1`, range `1..32`) — number of GPIO bank instances to register at load time. Each `gpioN` instance models **one logical bank of 8 lines**. With `num_gpio_devs=2`, instances are `gpio0` and `gpio1`.
 
 ---
 
@@ -94,9 +97,11 @@ Fault injection and device configuration are done exclusively via **sysfs**:
 
 - Arm a fault: `echo 500000 > /sys/kernel/virtrtlab/devices/uart0/latency_ns`
 - Observe termios state: `cat /sys/kernel/virtrtlab/devices/uart0/baud`
-- Inject GPIO input bits: `echo 0x01 > /sys/kernel/virtrtlab/devices/gpio0/value`
+- Inject GPIO input bits: `echo 0:1 > /sys/kernel/virtrtlab/devices/gpio0/inject`
 
 `virtrtlabctl` is a thin sysfs convenience wrapper and a `virtrtlabd` lifecycle manager.
+
+AUT integration contract: [docs/device-contract.md](docs/device-contract.md).
 
 ### Components
 
@@ -119,8 +124,14 @@ Fault injection and device configuration are done exclusively via **sysfs**:
 .
 |-- docs/
 |   |-- README.md
+|   |-- device-contract.md
 |   |-- socket-api.md
 |   `-- sysfs.md
+|-- daemon/
+|   |-- Makefile
+|   |-- main.c
+|   |-- epoll_loop.c
+|   `-- instance.c
 |-- kernel/
 |   |-- include/
 |   |-- virtrtlab_core.c
@@ -190,12 +201,10 @@ Type-specific examples:
   - `stats/reset` (wo): write `0` to reset all counters atomically
 
 - GPIO (`…/gpio0/`)
-  - `direction` (rw): 8-bit mask in canonical `0xnn` form; write format is strict `0xNN`, bit=`1` means AUT output, bit=`0` means AUT input
-  - `value` (rw/ro): 8-bit logical bank value in canonical `0xnn` form; sysfs writes drive only AUT-input bits and are interpreted after `active_low`
-  - `active_low` (rw): 8-bit mask in canonical `0xnn` form
-  - `edge_rising` (rw): 8-bit mask in canonical `0xnn` form
-  - `edge_falling` (rw): 8-bit mask in canonical `0xnn` form
-  - `stats/value_changes`, `stats/edge_events`, `stats/drops` (ro)
+  - `chip_path` (ro): AUT-facing GPIO chardev path, e.g. `/dev/gpiochip4`
+  - `sysfs_base` (ro, optional): first global GPIO number for the legacy `/sys/class/gpio` ABI
+  - `inject` (wo): write `N:V` to inject a physical value on line `N`
+  - `stats/value_changes`, `stats/bitflips`, `stats/drops` (ro)
   - `stats/reset` (wo): write `0` to reset all GPIO counters atomically
 
 - SPI (`…/spi0/`)
@@ -267,9 +276,9 @@ Command structure:
   - `virtrtlabctl get uart0 baud`
   - `virtrtlabctl set uart0 latency_ns=500000`
   - `virtrtlabctl set uart0 drop_rate_ppm=20000`
-  - `virtrtlabctl get gpio0 value`
-  - `virtrtlabctl set gpio0 direction=0x00`
-  - `virtrtlabctl set gpio0 value=0x01`
+  - `virtrtlabctl get gpio0 chip_path`
+  - `virtrtlabctl get gpio0 sysfs_base`
+  - `virtrtlabctl set gpio0 inject=0:1`
   - `virtrtlabctl stats uart0` — display all stats counters for uart0
   - `virtrtlabctl stats gpio0` — display all stats counters for gpio0
   - `virtrtlabctl reset uart0` — reset stats counters only (equivalent to writing `0` to `stats/reset`); for a full device reset including fault attrs and `enabled`, write `reset` to the bus `state` attr
@@ -280,6 +289,49 @@ Command structure:
   - `virtrtlabctl daemon status`
 
 Global flags: `--json` for machine parsing, `--no-sudo` for callers with existing privileges.
+
+### AUT integration contract
+
+VirtRTLab selects simulated devices at runtime, not at compile time.
+
+Stable environment-variable contract:
+
+| Variable | Meaning |
+|---|---|
+| `VIRTRTLAB_UART<N>` | AUT-facing UART path, e.g. `/dev/ttyVIRTLAB0` |
+| `VIRTRTLAB_GPIOCHIP<N>` | AUT-facing GPIO chardev path, e.g. `/dev/gpiochip4` |
+| `VIRTRTLAB_GPIOBASE<N>` | Legacy sysfs GPIO base for bank `gpioN`, exported only when `/sys/class/gpio` is available |
+| `VIRTRTLAB_GPIOCTRL<N>` | VirtRTLab GPIO control root, e.g. `/sys/kernel/virtrtlab/devices/gpio0` |
+
+Recommended AUT pattern:
+
+```c
+const char *uart0 = getenv("VIRTRTLAB_UART0");
+if (!uart0)
+    uart0 = "/dev/ttyS0";
+```
+
+If a `VIRTRTLAB_*` variable is present but invalid, the AUT or harness must fail
+fast rather than silently falling back to real hardware.
+
+Minimal CI flow:
+
+```yaml
+- name: Start VirtRTLab
+  run: virtrtlabctl up --uart 1 --gpio 1
+
+- name: Run AUT tests
+  env:
+    VIRTRTLAB_UART0: /dev/ttyVIRTLAB0
+    VIRTRTLAB_GPIOCHIP0: /dev/gpiochip4
+    VIRTRTLAB_GPIOCTRL0: /sys/kernel/virtrtlab/devices/gpio0
+  run: pytest tests/aut/ -v
+```
+
+If the host also exposes the legacy `/sys/class/gpio` ABI, `virtrtlabctl up`
+additionally exports `VIRTRTLAB_GPIOBASE<N>`.
+
+Full contract: [docs/device-contract.md](docs/device-contract.md).
 
 Exit codes:
   - `0` success
