@@ -118,8 +118,10 @@ check:
 	   grep -q "^CONFIG_GPIO_SIM=y" /boot/config-$(KVER) 2>/dev/null; then \
 		echo "[OK]   gpio-sim"; \
 	else \
-		echo "[WARN] gpio-sim not available — GPIO chardev tests will be skipped"; \
-		echo "       Needs kernel >= 5.17 with CONFIG_GPIO_SIM=m"; \
+		echo "[WARN] gpio-sim not available — GPIO emulation will be disabled at runtime"; \
+		echo "       Requires CONFIG_GPIO_SIM=m in kernel (select IRQ_SIM, CONFIGFS_FS,"; \
+		echo "       DEV_SYNC_PROBE). Most distro kernels do NOT ship this — kernel"; \
+		echo "       recompile required. See docs/kernel-requirements.md"; \
 		warns=$$((warns + 1)); \
 	fi; \
 	\
@@ -158,7 +160,7 @@ install: _check_root all
 	getent group  virtrtlab >/dev/null 2>&1 || groupadd --system virtrtlab
 	getent passwd virtrtlab >/dev/null 2>&1 || \
 	    useradd --system --gid virtrtlab --no-create-home \
-	            --shell /usr/sbin/nologin virtrtlab
+	            --home-dir /nonexistent --shell /usr/sbin/nologin virtrtlab
 	systemctl daemon-reload
 	@echo ""
 	@echo "=== Installation complete ==="
@@ -189,12 +191,10 @@ uninstall: _check_root
 	-rmdir $(MODDIR) 2>/dev/null || true
 	-depmod -a 2>/dev/null || true
 	rm -f $(SUDOERS)/virtrtlab-dev
+	-userdel  virtrtlab 2>/dev/null || true
+	-groupdel virtrtlab 2>/dev/null || true
 	@echo ""
 	@echo "=== Uninstall complete ==="
-	@echo "    Group and user virtrtlab were NOT removed (may be shared)."
-	@echo "    To remove manually:"
-	@echo "      sudo userdel  virtrtlab"
-	@echo "      sudo groupdel virtrtlab"
 
 # ── dkms ──────────────────────────────────────────────────────────────────────
 
