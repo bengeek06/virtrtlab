@@ -58,7 +58,8 @@ static int wire_open(struct uart_instance *inst)
 static int wire_reopen(struct uart_instance *inst, int epoll_fd)
 {
 	epoll_loop_del(epoll_fd, inst->wire_fd);
-	close(inst->wire_fd);
+	if (close(inst->wire_fd) < 0)
+		syslog(LOG_WARNING, "uart%d: close wire_fd: %m", inst->idx);
 	inst->wire_fd = wire_open(inst);
 	return inst->wire_fd;
 }
@@ -241,7 +242,9 @@ static void close_client_and_drain(struct uart_instance *inst, int epoll_fd)
 			 * EOF: wire device was reset between simulator
 			 * disconnect and drain — reopen fresh.
 			 */
-			close(inst->wire_fd);
+			if (close(inst->wire_fd) < 0)
+				syslog(LOG_WARNING, "uart%d: close wire_fd (drain-reopen): %m",
+				       inst->idx);
 			inst->wire_fd = wire_open(inst);
 			if (inst->wire_fd < 0)
 				return; /* wire lost; instance stays with no wire */

@@ -38,6 +38,7 @@ int epoll_loop_create(void)
 	fd = epoll_create1(EPOLL_CLOEXEC);
 	if (fd < 0) {
 		syslog(LOG_ERR, "epoll_create1: %m");
+		closelog();
 		abort();
 	}
 	return fd;
@@ -53,7 +54,8 @@ void epoll_loop_add(int epoll_fd, int fd, uint32_t events, struct evt_ctx *ctx)
 
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) < 0) {
 		syslog(LOG_ERR, "epoll_ctl ADD: %m");
-		abort(); /* M2: unrecoverable — fd would not be monitored */
+		closelog();
+		abort(); /* unrecoverable — fd would not be monitored */
 	}
 }
 
