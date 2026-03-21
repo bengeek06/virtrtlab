@@ -227,7 +227,7 @@ dkms-add: _check_root
 # First-time setup:
 #   make venv               creates .venv/ and installs Python QA tools
 #   apt install clang-tidy clang-format sparse   (for daemon/kernel checks)
-#   make checkpatch.pl      downloads checkpatch from kernel.org
+#   make checkpatch.pl      downloads checkpatch from torvalds/linux (GitHub)
 #
 # Daily use:
 #   make qa                 CLI + daemon checks
