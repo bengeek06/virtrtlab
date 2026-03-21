@@ -258,6 +258,26 @@ def _is_module_loaded(name: str) -> bool:
     return False
 
 
+def _find_virtrtlabd_pid() -> int | None:
+    """Scan /proc for a running virtrtlabd process and return its PID.
+
+    Used to find the actual daemon PID after launch via sudo, where
+    Popen.pid is the sudo wrapper PID rather than virtrtlabd's own PID.
+    """
+    try:
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                if (entry / "comm").read_text().strip() == "virtrtlabd":
+                    return int(entry.name)
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return None
+
+
 def _daemon_pid(run_dir: str = RUN_DIR) -> int | None:
     """Return daemon PID if virtrtlabd is alive, else None.
 
@@ -605,15 +625,16 @@ def cmd_up(args: argparse.Namespace) -> int:
     _write_run_file("modules.list", "\n".join(all_mod_order) + "\n", no_sudo)
 
     # Start daemon in background if not already running
+    needs_pid_record = False
     if _daemon_pid() is None:
         uart_count = sum(d["count"] for d in profile["devices"] if d["type"] == "uart")
-        proc = subprocess.Popen(
+        subprocess.Popen(
             _sudo_prefix(no_sudo)
             + [DAEMON_BIN, "--num-uarts", str(uart_count), "--run-dir", RUN_DIR],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        _write_run_file("daemon.pid", str(proc.pid) + "\n", no_sudo)
+        needs_pid_record = True
 
     # Poll all expected sockets (up to 5 s)
     expected_socks = _expected_sockets(profile)
@@ -622,6 +643,14 @@ def cmd_up(args: argparse.Namespace) -> int:
         # Socket permissions are set by the daemon at bind() time via
         # umask(0117) + chown(root:virtrtlab) on the socket path — no CLI
         # intervention needed.
+
+    # Record daemon PID after sockets confirm it is running.
+    # Popen.pid is the sudo wrapper PID when launched via sudo — scan /proc
+    # for the actual virtrtlabd PID instead.
+    if needs_pid_record:
+        actual_pid = _find_virtrtlabd_pid()
+        if actual_pid is not None:
+            _write_run_file("daemon.pid", str(actual_pid) + "\n", no_sudo)
 
     # GPIO inject and /dev/gpiochipN permissions are handled by udev rules
     # installed at /lib/udev/rules.d/90-virtrtlab.rules — no CLI intervention.
@@ -951,16 +980,20 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    _write_run_file("daemon.pid", str(proc.pid) + "\n", no_sudo, run_dir=run_dir)
 
     # Poll uart sockets in the correct run_dir
     expected_socks = [Path(run_dir) / f"uart{i}.sock" for i in range(num_uarts)]
     _poll_sockets(expected_socks)
 
+    # Record actual PID: when launched via sudo, proc.pid is the sudo wrapper
+    # PID, not virtrtlabd's own PID. Scan /proc for the real PID.
+    actual_pid = _find_virtrtlabd_pid() or proc.pid
+    _write_run_file("daemon.pid", str(actual_pid) + "\n", no_sudo, run_dir=run_dir)
+
     if args.json:
-        _emit({"state": "running", "pid": proc.pid}, True)
+        _emit({"state": "running", "pid": actual_pid}, True)
     else:
-        print(f"daemon started (pid {proc.pid})")
+        print(f"daemon started (pid {actual_pid})")
     return 0
 
 
