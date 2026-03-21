@@ -12,6 +12,7 @@ import sys
 import time
 import tomllib
 from pathlib import Path
+from typing import Any, cast
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -27,7 +28,8 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 _DAEMON_RELATIVE = _SCRIPT_DIR.parent / "daemon" / "virtrtlabd"
 DAEMON_BIN: str = os.environ.get(
     "VIRTRTLABD",
-    str(_DAEMON_RELATIVE) if _DAEMON_RELATIVE.exists()
+    str(_DAEMON_RELATIVE)
+    if _DAEMON_RELATIVE.exists()
     else (shutil.which("virtrtlabd") or "virtrtlabd"),
 )
 KNOWN_MODULES = ["virtrtlab_core", "virtrtlab_uart", "virtrtlab_gpio"]
@@ -67,8 +69,8 @@ def _run_cmd(
     check: bool = True,
     capture: bool = False,
     exit_code: int = 1,
-) -> subprocess.CompletedProcess:
-    kwargs: dict = {}
+) -> subprocess.CompletedProcess[str]:
+    kwargs: dict[str, Any] = {}
     if capture:
         kwargs["stdout"] = subprocess.PIPE
         kwargs["stderr"] = subprocess.PIPE
@@ -82,7 +84,7 @@ def _run_cmd(
         ) from exc
 
 
-def _emit(data: "dict | list | str", json_flag: bool) -> None:
+def _emit(data: "dict[str, Any] | list[Any] | str", json_flag: bool) -> None:
     if json_flag:
         print(json.dumps(data if not isinstance(data, str) else {"message": data}))
     else:
@@ -125,7 +127,9 @@ def _find_ko(module_name: str, module_dir: str | None = None) -> Path:
         try:
             result = subprocess.run(
                 [modinfo_bin, "-n", module_name],
-                capture_output=True, text=True, check=True,
+                capture_output=True,
+                text=True,
+                check=True,
             )
             p = Path(result.stdout.strip())
             if p.exists():
@@ -148,7 +152,7 @@ def _find_ko(module_name: str, module_dir: str | None = None) -> Path:
     raise VirtrtlabError(f"{filename} not found (searched: {searched})", exit_code=1)
 
 
-def _resolve_profile(args: argparse.Namespace) -> dict:
+def _resolve_profile(args: argparse.Namespace) -> dict[str, Any]:
     """Resolve a lab profile from TOML file + inline overrides.
 
     Returns: {'devices': [{'type': str, 'count': int}, ...],
@@ -156,7 +160,7 @@ def _resolve_profile(args: argparse.Namespace) -> dict:
                'build':   {'module_dir': str | None, ...}}
     Raises VirtrtlabError(2) on parse/validation errors.
     """
-    profile: dict = {"devices": [], "bus": {}, "build": {}}
+    profile: dict[str, Any] = {"devices": [], "bus": {}, "build": {}}
 
     # Locate TOML file
     toml_path: Path | None = None
@@ -175,7 +179,9 @@ def _resolve_profile(args: argparse.Namespace) -> dict:
             try:
                 data = tomllib.load(fh)
             except tomllib.TOMLDecodeError as exc:
-                raise VirtrtlabError(f"profile parse error: {exc}", exit_code=2) from exc
+                raise VirtrtlabError(
+                    f"profile parse error: {exc}", exit_code=2
+                ) from exc
         try:
             profile["build"] = data.get("build", {})
             profile["bus"] = data.get("bus", {})
@@ -230,9 +236,7 @@ def _resolve_profile(args: argparse.Namespace) -> dict:
     # Validate device types
     for dev in profile["devices"]:
         if dev["type"] not in MODULE_MAP:
-            raise VirtrtlabError(
-                f"unknown device type: {dev['type']}", exit_code=2
-            )
+            raise VirtrtlabError(f"unknown device type: {dev['type']}", exit_code=2)
 
     return profile
 
@@ -252,6 +256,67 @@ def _is_module_loaded(name: str) -> bool:
     except OSError:
         pass
     return False
+
+
+def _find_virtrtlabd_pid() -> int | None:
+    """Scan /proc for a running virtrtlabd process and return its PID.
+
+    Used to find the actual daemon PID after launch via sudo, where
+    Popen.pid is the sudo wrapper PID rather than virtrtlabd's own PID.
+
+    When multiple virtrtlabd instances are running, prefer the one whose
+    command line matches the current RUN_DIR. If no such match exists and
+    exactly one virtrtlabd process is found, return that PID. If multiple
+    candidates exist with no RUN_DIR match, return None to avoid picking
+    an arbitrary instance.
+    """
+    # Prefer a process whose cmdline contains --run-dir <RUN_DIR> or
+    # --run-dir=RUN_DIR, fall back to a unique virtrtlabd instance.
+    fallback_pid: int | None = None
+    virtrtlabd_count = 0
+    try:
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                if (entry / "comm").read_text().strip() != "virtrtlabd":
+                    continue
+                pid = int(entry.name)
+                virtrtlabd_count += 1
+                cmdline_path = entry / "cmdline"
+                try:
+                    raw = cmdline_path.read_text()
+                except OSError:
+                    # If cmdline is unreadable, we cannot match RUN_DIR;
+                    # remember this PID only as a potential fallback.
+                    if fallback_pid is None:
+                        fallback_pid = pid
+                    continue
+                args = [arg for arg in raw.split("\0") if arg]
+                # Match either "--run-dir=<RUN_DIR>" or "--run-dir", RUN_DIR.
+                run_dir_match = False
+                run_dir_eq = f"--run-dir={RUN_DIR}"
+                if run_dir_eq in args:
+                    run_dir_match = True
+                else:
+                    for i, arg in enumerate(args):
+                        if arg == "--run-dir" and i + 1 < len(args):
+                            if args[i + 1] == RUN_DIR:
+                                run_dir_match = True
+                                break
+                if run_dir_match:
+                    return pid
+                if fallback_pid is None:
+                    fallback_pid = pid
+            except OSError:
+                continue
+    except OSError:
+        pass
+    # If we saw exactly one virtrtlabd process, return it even if we
+    # could not match RUN_DIR, preserving the original behaviour.
+    if virtrtlabd_count == 1:
+        return fallback_pid
+    return None
 
 
 def _daemon_pid(run_dir: str = RUN_DIR) -> int | None:
@@ -291,7 +356,9 @@ def _ensure_run_dir(no_sudo: bool) -> None:
     _run_cmd(_sudo_prefix(no_sudo) + ["mkdir", "-p", RUN_DIR], exit_code=1)
 
 
-def _write_run_file(filename: str, content: str, no_sudo: bool, run_dir: str = RUN_DIR) -> None:
+def _write_run_file(
+    filename: str, content: str, no_sudo: bool, run_dir: str = RUN_DIR
+) -> None:
     """Write content to <run_dir>/<filename> via sudo tee (or directly if --no-sudo)."""
     path = Path(run_dir) / filename
     if no_sudo:
@@ -300,8 +367,10 @@ def _write_run_file(filename: str, content: str, no_sudo: bool, run_dir: str = R
         try:
             subprocess.run(
                 ["sudo", "tee", str(path)],
-                input=content, text=True,
-                stdout=subprocess.DEVNULL, check=True,
+                input=content,
+                text=True,
+                stdout=subprocess.DEVNULL,
+                check=True,
             )
         except subprocess.CalledProcessError as exc:
             raise VirtrtlabError(
@@ -354,13 +423,11 @@ def _poll_sockets(sock_paths: list[Path], timeout: float = 5.0) -> None:
             break
         if time.monotonic() >= deadline:
             missing = ", ".join(str(p) for p in remaining)
-            raise VirtrtlabError(
-                f"timeout waiting for sockets: {missing}", exit_code=3
-            )
+            raise VirtrtlabError(f"timeout waiting for sockets: {missing}", exit_code=3)
         time.sleep(0.1)
 
 
-def _expected_sockets(profile: dict) -> list[Path]:
+def _expected_sockets(profile: dict[str, Any]) -> list[Path]:
     """Return expected socket paths for UART devices in the profile."""
     run = Path(RUN_DIR)
     return [
@@ -371,7 +438,7 @@ def _expected_sockets(profile: dict) -> list[Path]:
     ]
 
 
-def _modules_load_order(profile: dict) -> list[str]:
+def _modules_load_order(profile: dict[str, Any]) -> list[str]:
     """Return module names in load order: core first, then device modules."""
     names: list[str] = ["virtrtlab_core"]
     for dev in profile["devices"]:
@@ -381,7 +448,9 @@ def _modules_load_order(profile: dict) -> list[str]:
     return names
 
 
-def _resolve_aut_contract(profile: dict, run_dir: str = RUN_DIR) -> list[dict]:
+def _resolve_aut_contract(
+    profile: dict[str, Any], run_dir: str = RUN_DIR
+) -> list[dict[str, Any]]:
     """Resolve the AUT integration contract for every device in the profile.
 
     For UART devices the paths are derived deterministically from the instance
@@ -396,7 +465,7 @@ def _resolve_aut_contract(profile: dict, run_dir: str = RUN_DIR) -> list[dict]:
 
     Returns a list of device contract dicts in profile declaration order.
     """
-    contract: list[dict] = []
+    contract: list[dict[str, Any]] = []
     uart_idx = 0
     gpio_idx = 0
 
@@ -408,16 +477,18 @@ def _resolve_aut_contract(profile: dict, run_dir: str = RUN_DIR) -> list[dict]:
             for i in range(count):
                 idx = uart_idx + i
                 aut_path = f"/dev/ttyVIRTLAB{idx}"
-                contract.append({
-                    "name": f"uart{idx}",
-                    "type": "uart",
-                    "aut_path": aut_path,
-                    "wire_path": f"/dev/virtrtlab-wire{idx}",
-                    "socket_path": f"{run_dir}/uart{idx}.sock",
-                    "env": {
-                        f"VIRTRTLAB_UART{idx}": aut_path,
-                    },
-                })
+                contract.append(
+                    {
+                        "name": f"uart{idx}",
+                        "type": "uart",
+                        "aut_path": aut_path,
+                        "wire_path": f"/dev/virtrtlab-wire{idx}",
+                        "socket_path": f"{run_dir}/uart{idx}.sock",
+                        "env": {
+                            f"VIRTRTLAB_UART{idx}": aut_path,
+                        },
+                    }
+                )
             uart_idx += count
 
         elif dev_type == "gpio":
@@ -446,7 +517,7 @@ def _resolve_aut_contract(profile: dict, run_dir: str = RUN_DIR) -> list[dict]:
                         exit_code=4,
                     )
 
-                entry: dict = {
+                entry: dict[str, Any] = {
                     "name": f"gpio{idx}",
                     "type": "gpio",
                     "chip_path": chip_path,
@@ -483,7 +554,7 @@ def _resolve_aut_contract(profile: dict, run_dir: str = RUN_DIR) -> list[dict]:
     return contract
 
 
-def _print_contract_human(contract: list[dict]) -> None:
+def _print_contract_human(contract: list[dict[str, Any]]) -> None:
     """Print the AUT integration contract in the spec-mandated human format.
 
     Env var emission order matches device-contract.md exactly:
@@ -493,7 +564,7 @@ def _print_contract_human(contract: list[dict]) -> None:
     for entry in contract:
         name = entry["name"]
         etype = entry["type"]
-        idx = name[len(etype):]          # e.g. "0" from "uart0" or "gpio0"
+        idx = name[len(etype) :]  # e.g. "0" from "uart0" or "gpio0"
         env = entry.get("env", {})
         print(f"[ok] {name} loaded")
         if etype == "uart":
@@ -540,7 +611,9 @@ def cmd_up(args: argparse.Namespace) -> int:
         all(_is_module_loaded(m) for m in expected_module_names)
         and _daemon_pid() is not None
     ):
-        print("warning: lab already up (modules loaded, daemon running)", file=sys.stderr)
+        print(
+            "warning: lab already up (modules loaded, daemon running)", file=sys.stderr
+        )
         contract = _resolve_aut_contract(profile)
         if args.json:
             _emit({"devices": contract}, True)
@@ -554,7 +627,9 @@ def cmd_up(args: argparse.Namespace) -> int:
     modules_to_load: list[tuple[str, str, int]] = [("virtrtlab_core", "", 0)]
     for dev in profile["devices"]:
         ko_filename, param_name = MODULE_MAP[dev["type"]]
-        modules_to_load.append((ko_filename.removesuffix(".ko"), param_name, dev["count"]))
+        modules_to_load.append(
+            (ko_filename.removesuffix(".ko"), param_name, dev["count"])
+        )
 
     loaded_this_run: list[str] = []
     for module_name, param_name, count in modules_to_load:
@@ -575,8 +650,10 @@ def cmd_up(args: argparse.Namespace) -> int:
         try:
             subprocess.run(
                 _sudo_prefix(no_sudo) + ["tee", f"{SYSFS_ROOT}/buses/vrtlbus0/seed"],
-                input=str(seed), text=True,
-                stdout=subprocess.DEVNULL, check=True,
+                input=str(seed),
+                text=True,
+                stdout=subprocess.DEVNULL,
+                check=True,
             )
         except subprocess.CalledProcessError as exc:
             raise VirtrtlabError(
@@ -589,13 +666,16 @@ def cmd_up(args: argparse.Namespace) -> int:
     _write_run_file("modules.list", "\n".join(all_mod_order) + "\n", no_sudo)
 
     # Start daemon in background if not already running
+    needs_pid_record = False
     if _daemon_pid() is None:
         uart_count = sum(d["count"] for d in profile["devices"] if d["type"] == "uart")
-        proc = subprocess.Popen(
-            _sudo_prefix(no_sudo) + [DAEMON_BIN, "--num-uarts", str(uart_count), "--run-dir", RUN_DIR],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        subprocess.Popen(
+            _sudo_prefix(no_sudo)
+            + [DAEMON_BIN, "--num-uarts", str(uart_count), "--run-dir", RUN_DIR],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-        _write_run_file("daemon.pid", str(proc.pid) + "\n", no_sudo)
+        needs_pid_record = True
 
     # Poll all expected sockets (up to 5 s)
     expected_socks = _expected_sockets(profile)
@@ -604,6 +684,14 @@ def cmd_up(args: argparse.Namespace) -> int:
         # Socket permissions are set by the daemon at bind() time via
         # umask(0117) + chown(root:virtrtlab) on the socket path — no CLI
         # intervention needed.
+
+    # Record daemon PID after sockets confirm it is running.
+    # Popen.pid is the sudo wrapper PID when launched via sudo — scan /proc
+    # for the actual virtrtlabd PID instead.
+    if needs_pid_record:
+        actual_pid = _find_virtrtlabd_pid()
+        if actual_pid is not None:
+            _write_run_file("daemon.pid", str(actual_pid) + "\n", no_sudo)
 
     # GPIO inject and /dev/gpiochipN permissions are handled by udev rules
     # installed at /lib/udev/rules.d/90-virtrtlab.rules — no CLI intervention.
@@ -622,7 +710,9 @@ def cmd_down(args: argparse.Namespace) -> int:
     modules_list_file = Path(RUN_DIR) / "modules.list"
 
     if modules_list_file.exists():
-        modules = [m.strip() for m in modules_list_file.read_text().splitlines() if m.strip()]
+        modules = [
+            m.strip() for m in modules_list_file.read_text().splitlines() if m.strip()
+        ]
     else:
         print(
             f"warning: {modules_list_file} not found — attempting rmmod on known modules",
@@ -653,7 +743,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     # Daemon
     pid = _daemon_pid()
-    daemon_info: dict = (
+    daemon_info: dict[str, Any] = (
         {"state": "running", "pid": pid} if pid else {"state": "stopped", "pid": None}
     )
 
@@ -663,7 +753,9 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     # Bus state
     bus_state_path = Path(SYSFS_ROOT) / "buses" / "vrtlbus0" / "state"
-    bus_state = bus_state_path.read_text().strip() if bus_state_path.exists() else "unknown"
+    bus_state = (
+        bus_state_path.read_text().strip() if bus_state_path.exists() else "unknown"
+    )
 
     if args.json:
         _emit(
@@ -683,9 +775,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("daemon:")
         if pid:
             print(f"  pid    {pid}")
-            print(f"  state  running")
+            print("  state  running")
         else:
-            print(f"  state  stopped")
+            print("  state  stopped")
         print()
         print("sockets:")
         for sock in sockets:
@@ -705,7 +797,9 @@ def cmd_list(args: argparse.Namespace) -> int:
     if target == "buses":
         buses_dir = Path(SYSFS_ROOT) / "buses"
         if not buses_dir.exists():
-            raise VirtrtlabError("sysfs bus directory not found (is the module loaded?)", exit_code=4)
+            raise VirtrtlabError(
+                "sysfs bus directory not found (is the module loaded?)", exit_code=4
+            )
         buses = sorted(p.name for p in buses_dir.iterdir() if p.is_dir())
         if args.json:
             _emit({"buses": buses}, True)
@@ -717,7 +811,9 @@ def cmd_list(args: argparse.Namespace) -> int:
     # target == "devices"
     devices_dir = Path(SYSFS_ROOT) / "devices"
     if not devices_dir.exists():
-        raise VirtrtlabError("sysfs device directory not found (is the module loaded?)", exit_code=4)
+        raise VirtrtlabError(
+            "sysfs device directory not found (is the module loaded?)", exit_code=4
+        )
     type_filter: str | None = getattr(args, "type", None)
     result = []
     for dev_path in sorted(devices_dir.iterdir()):
@@ -730,15 +826,23 @@ def cmd_list(args: argparse.Namespace) -> int:
         bus_file = dev_path / "bus"
         bus = bus_file.read_text().strip() if bus_file.exists() else "unknown"
         enabled_file = dev_path / "enabled"
-        enabled = enabled_file.read_text().strip() == "1" if enabled_file.exists() else None
-        result.append({"name": dev_path.name, "type": dev_type, "bus": bus, "enabled": enabled})
+        enabled = (
+            enabled_file.read_text().strip() == "1" if enabled_file.exists() else None
+        )
+        result.append(
+            {"name": dev_path.name, "type": dev_type, "bus": bus, "enabled": enabled}
+        )
 
     if args.json:
         _emit({"devices": result}, True)
     else:
         for d in result:
-            enabled_str = ("yes" if d["enabled"] else "no") if d["enabled"] is not None else "?"
-            print(f"{d['name']:<20} type={d['type']:<8} bus={d['bus']:<12} enabled={enabled_str}")
+            enabled_str = (
+                ("yes" if d["enabled"] else "no") if d["enabled"] is not None else "?"
+            )
+            print(
+                f"{d['name']:<20} type={d['type']:<8} bus={d['bus']:<12} enabled={enabled_str}"
+            )
     return 0
 
 
@@ -751,9 +855,7 @@ def _sysfs_path(target: str, attr: str) -> Path:
 def cmd_get(args: argparse.Namespace) -> int:
     path = _sysfs_path(args.target, args.attr)
     if not path.exists():
-        raise VirtrtlabError(
-            f"attribute not found: {path}", exit_code=4
-        )
+        raise VirtrtlabError(f"attribute not found: {path}", exit_code=4)
     try:
         value = path.read_text().strip()
     except OSError as exc:
@@ -775,7 +877,8 @@ def cmd_set(args: argparse.Namespace) -> int:
         attr = attr.strip()
         if not attr:
             raise VirtrtlabError(
-                f"invalid assignment '{assignment}': attribute name is empty", exit_code=2
+                f"invalid assignment '{assignment}': attribute name is empty",
+                exit_code=2,
             )
         path = _sysfs_path(args.target, attr)
         if not path.exists():
@@ -822,7 +925,8 @@ def cmd_reset(args: argparse.Namespace) -> int:
         reset_path.write_text("0")
     except OSError as exc:
         raise VirtrtlabError(
-            f"kernel rejected stats reset for {args.device}: {exc.strerror}", exit_code=4
+            f"kernel rejected stats reset for {args.device}: {exc.strerror}",
+            exit_code=4,
         ) from exc
     return 0
 
@@ -868,7 +972,8 @@ def cmd_inject(args: argparse.Namespace) -> int:
         inject_path.write_text(f"{line}:{value}")
     except OSError as exc:
         raise VirtrtlabError(
-            f"kernel rejected inject on {device} line {line}: {exc.strerror}", exit_code=4
+            f"kernel rejected inject on {device} line {line}: {exc.strerror}",
+            exit_code=4,
         ) from exc
 
     if args.json:
@@ -886,7 +991,9 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         pid = _daemon_pid()
         if args.json:
             _emit(
-                {"state": "running", "pid": pid} if pid else {"state": "stopped", "pid": None},
+                {"state": "running", "pid": pid}
+                if pid
+                else {"state": "stopped", "pid": None},
                 True,
             )
         else:
@@ -909,19 +1016,25 @@ def cmd_daemon(args: argparse.Namespace) -> int:
 
     _run_cmd(_sudo_prefix(no_sudo) + ["mkdir", "-p", run_dir], exit_code=1)
     proc = subprocess.Popen(
-        _sudo_prefix(no_sudo) + [DAEMON_BIN, "--num-uarts", str(num_uarts), "--run-dir", run_dir],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        _sudo_prefix(no_sudo)
+        + [DAEMON_BIN, "--num-uarts", str(num_uarts), "--run-dir", run_dir],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
-    _write_run_file("daemon.pid", str(proc.pid) + "\n", no_sudo, run_dir=run_dir)
 
     # Poll uart sockets in the correct run_dir
     expected_socks = [Path(run_dir) / f"uart{i}.sock" for i in range(num_uarts)]
     _poll_sockets(expected_socks)
 
+    # Record actual PID: when launched via sudo, proc.pid is the sudo wrapper
+    # PID, not virtrtlabd's own PID. Scan /proc for the real PID.
+    actual_pid = _find_virtrtlabd_pid() or proc.pid
+    _write_run_file("daemon.pid", str(actual_pid) + "\n", no_sudo, run_dir=run_dir)
+
     if args.json:
-        _emit({"state": "running", "pid": proc.pid}, True)
+        _emit({"state": "running", "pid": actual_pid}, True)
     else:
-        print(f"daemon started (pid {proc.pid})")
+        print(f"daemon started (pid {actual_pid})")
     return 0
 
 
@@ -996,11 +1109,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p_inject = sub.add_parser("inject", help="Inject a GPIO line value")
     p_inject.add_argument("device", help="GPIO device name (e.g. gpio0)")
     p_inject.add_argument(
-        "line", type=_valid_line, metavar="LINE",
+        "line",
+        type=_valid_line,
+        metavar="LINE",
         help="GPIO line index (0..7)",
     )
     p_inject.add_argument(
-        "value", type=_valid_value, metavar="VALUE",
+        "value",
+        type=_valid_value,
+        metavar="VALUE",
         help="Physical value to inject (0 or 1)",
     )
     p_inject.set_defaults(func=cmd_inject)
@@ -1027,7 +1144,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     try:
-        return args.func(args)
+        return cast(int, args.func(args))
     except VirtrtlabError as exc:
         if getattr(args, "json", False):
             print(json.dumps({"error": str(exc), "code": exc.exit_code}))

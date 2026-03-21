@@ -158,10 +158,10 @@ static void virtrtlab_bus_set_state(enum virtrtlab_bus_state new_state)
 	spin_unlock_irqrestore(&virtrtlab_bus_lock, flags);
 
 	if (old_state != new_state) {
-		virtrtlab_bus_notifier_call(
-			new_state == VIRTRTLAB_BUS_STATE_UP ?
-			VIRTRTLAB_BUS_EVENT_UP :
-			VIRTRTLAB_BUS_EVENT_DOWN);
+		unsigned long ev = (new_state == VIRTRTLAB_BUS_STATE_UP) ?
+				   VIRTRTLAB_BUS_EVENT_UP :
+				   VIRTRTLAB_BUS_EVENT_DOWN;
+		virtrtlab_bus_notifier_call(ev);
 	}
 
 	mutex_unlock(&virtrtlab_bus_state_mutex);

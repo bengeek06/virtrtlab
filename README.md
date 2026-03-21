@@ -2,6 +2,8 @@
 
 # VirtRTLab
 
+[![CI](https://github.com/bengeek06/virtrtlab/actions/workflows/ci.yml/badge.svg)](https://github.com/bengeek06/virtrtlab/actions/workflows/ci.yml)
+
 **VirtRTLab** is a Linux kernel framework that simulates real-time peripherals — UART, GPIO, and more — so you can run an embedded application under test (AUT) against hardware faults **without physical hardware**.
 
 ---
