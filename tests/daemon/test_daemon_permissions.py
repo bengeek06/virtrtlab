@@ -18,6 +18,7 @@ import grp
 import os
 import socket
 import stat
+import time
 
 import pytest
 
@@ -59,7 +60,15 @@ class TestDaemonSocketPermissions:
         gid = _virtrtlab_gid()
         if gid is None:
             pytest.skip("group 'virtrtlab' does not exist on this system")
-        sock_gid = os.stat(SOCK_PATH).st_gid
+        # chown() in the daemon runs asynchronously after bind(); retry
+        # briefly to avoid a race between socket creation and ownership change.
+        deadline = time.monotonic() + 1.0
+        sock_gid = None
+        while time.monotonic() < deadline:
+            sock_gid = os.stat(SOCK_PATH).st_gid
+            if sock_gid == gid:
+                break
+            time.sleep(0.05)
         assert sock_gid == gid, (
             f"{SOCK_PATH}: expected gid {gid} (virtrtlab), got {sock_gid}"
         )
@@ -100,9 +109,20 @@ class TestDaemonSocketPermissions:
 
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.settimeout(2)
-            try:
-                s.connect(SOCK_PATH)
-            except PermissionError as exc:
-                pytest.fail(
-                    f"virtrtlab group member cannot connect to {SOCK_PATH}: {exc}"
-                )
+            # Retry briefly: listen() may not yet be called if we won the
+            # race between socket creation and listen() in the daemon.
+            deadline = time.monotonic() + 2.0
+            while True:
+                try:
+                    s.connect(SOCK_PATH)
+                    break
+                except ConnectionRefusedError:
+                    if time.monotonic() > deadline:
+                        pytest.fail(
+                            f"daemon not ready to accept on {SOCK_PATH} after 2 s"
+                        )
+                    time.sleep(0.05)
+                except PermissionError as exc:
+                    pytest.fail(
+                        f"virtrtlab group member cannot connect to {SOCK_PATH}: {exc}"
+                    )

@@ -22,11 +22,7 @@ import stat
 
 import pytest
 
-from conftest import (
-    KO,
-    SYSFS_ROOT,
-    _module_loaded,
-)
+from conftest import SYSFS_ROOT
 
 DEVICES_ROOT    = f"{SYSFS_ROOT}/devices"
 VIRTRTLAB_GROUP = "virtrtlab"
@@ -48,7 +44,8 @@ def _chip_path():
     attr = f"{DEVICES_ROOT}/gpio0/chip_path"
     if not os.path.exists(attr):
         pytest.skip(f"sysfs attribute not found: {attr}")
-    return open(attr).read().strip()
+    with open(attr) as f:
+        return f.read().strip()
 
 
 # ---------------------------------------------------------------------------

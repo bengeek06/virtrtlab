@@ -194,8 +194,8 @@ int main(int argc, char *argv[])
 	signal(SIGPIPE, SIG_IGN);
 
 	/*
-	 * Resolve the virtrtlab group ID once at startup so each socket can
-	 * be fchown'd to root:virtrtlab after bind().
+	 * Resolve the virtrtlab group ID once at startup so each socket path
+	 * can be chown(2)'d to root:virtrtlab after bind() by instance.c.
 	 * If the group does not exist, sockets are created root:root and the
 	 * daemon logs a warning — non-root connections will be refused until
 	 * the group is created and the daemon is restarted.

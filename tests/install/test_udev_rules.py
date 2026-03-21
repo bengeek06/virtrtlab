@@ -16,7 +16,7 @@ Coverage:
   - No world-write mode appears in any MODE= directive
 """
 
-import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -47,6 +47,8 @@ class TestUdevRulesSyntax:
 
     def test_udevadm_verify_passes(self):
         """udevadm verify reports no errors on 90-virtrtlab.rules."""
+        if shutil.which("udevadm") is None:
+            pytest.skip("udevadm not found — skipping syntax check")
         if not RULES_FILE.exists():
             pytest.skip(f"Rules file not found: {RULES_FILE}")
         result = subprocess.run(

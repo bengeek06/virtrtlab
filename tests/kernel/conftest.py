@@ -143,6 +143,10 @@ def gpio_module(core_module, request):
     _insmod(KO["gpio"], params)
     assert _module_loaded("virtrtlab_gpio"), "virtrtlab_gpio failed to load"
 
+    # Let udev rules apply asynchronously before tests assert permissions.
+    subprocess.run(["udevadm", "settle", "--timeout=5"],
+                   capture_output=True)
+
     yield
 
     _rmmod("virtrtlab_gpio")

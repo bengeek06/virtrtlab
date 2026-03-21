@@ -602,7 +602,8 @@ def cmd_up(args: argparse.Namespace) -> int:
     if expected_socks:
         _poll_sockets(expected_socks)
         # Socket permissions are set by the daemon at bind() time via
-        # umask(0117) + fchown(root:virtrtlab) — no CLI intervention needed.
+        # umask(0117) + chown(root:virtrtlab) on the socket path — no CLI
+        # intervention needed.
 
     # GPIO inject and /dev/gpiochipN permissions are handled by udev rules
     # installed at /lib/udev/rules.d/90-virtrtlab.rules — no CLI intervention.
