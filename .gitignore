@@ -29,6 +29,7 @@ __pycache__/
 .pytest_cache/
 .coverage
 checkpatch.pl
+dist/
 
 # OS/editor
 .DS_Store

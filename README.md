@@ -64,6 +64,16 @@ Components:
 
 ## Installation
 
+### Packaging (.deb)
+
+VirtRTLab now exposes two local package flows:
+
+- `make deb` (default) or `make deb-release-local`: builds the release-style package
+     with modules (DKMS source), daemon, CLI, udev rules, and systemd unit.
+- `make deb-dkms`: builds the DKMS-oriented developer package path.
+
+Both commands write generated `.deb` files under `dist/`.
+
 ### Prerequisites
 
 | Requirement | Debian/Ubuntu package |
