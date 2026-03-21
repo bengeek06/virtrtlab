@@ -366,6 +366,149 @@ def _modules_load_order(profile: dict) -> list[str]:
     return names
 
 
+def _resolve_aut_contract(profile: dict, run_dir: str = RUN_DIR) -> list[dict]:
+    """Resolve the AUT integration contract for every device in the profile.
+
+    For UART devices the paths are derived deterministically from the instance
+    index (no sysfs read needed for the TTY path).
+
+    For GPIO devices, chip_path is read from sysfs; VirtrtlabError(exit_code=4)
+    is raised if it is missing or empty (the module is not loaded or the contract
+    would violate the device-contract "empty = fail fast" rule).  If sysfs_base
+    is absent (host kernel built without CONFIG_GPIO_SYSFS), the key and its
+    VIRTRTLAB_GPIOBASE<N> env var are omitted; a warning is emitted on stderr
+    and stored in entry["warnings"] for JSON consumers.
+
+    Returns a list of device contract dicts in profile declaration order.
+    """
+    contract: list[dict] = []
+    uart_idx = 0
+    gpio_idx = 0
+
+    for dev in profile["devices"]:
+        count: int = dev["count"]
+        dev_type: str = dev["type"]
+
+        if dev_type == "uart":
+            for i in range(count):
+                idx = uart_idx + i
+                aut_path = f"/dev/ttyVIRTLAB{idx}"
+                contract.append({
+                    "name": f"uart{idx}",
+                    "type": "uart",
+                    "aut_path": aut_path,
+                    "wire_path": f"/dev/virtrtlab-wire{idx}",
+                    "socket_path": f"{run_dir}/uart{idx}.sock",
+                    "env": {
+                        f"VIRTRTLAB_UART{idx}": aut_path,
+                    },
+                })
+            uart_idx += count
+
+        elif dev_type == "gpio":
+            for i in range(count):
+                idx = gpio_idx + i
+                ctrl = f"{SYSFS_ROOT}/devices/gpio{idx}"
+                chip_path_file = Path(ctrl) / "chip_path"
+                sysfs_base_file = Path(ctrl) / "sysfs_base"
+
+                if not chip_path_file.exists():
+                    raise VirtrtlabError(
+                        f"gpio{idx}: chip_path not found in sysfs "
+                        f"(is virtrtlab_gpio loaded?)",
+                        exit_code=4,
+                    )
+                try:
+                    chip_path = chip_path_file.read_text().strip()
+                except OSError as exc:
+                    raise VirtrtlabError(
+                        f"gpio{idx}: cannot read chip_path: {exc}",
+                        exit_code=4,
+                    ) from exc
+                if not chip_path:
+                    raise VirtrtlabError(
+                        f"gpio{idx}: chip_path is empty in sysfs",
+                        exit_code=4,
+                    )
+
+                entry: dict = {
+                    "name": f"gpio{idx}",
+                    "type": "gpio",
+                    "chip_path": chip_path,
+                    "control_path": ctrl,
+                    "env": {
+                        f"VIRTRTLAB_GPIOCHIP{idx}": chip_path,
+                        f"VIRTRTLAB_GPIOCTRL{idx}": ctrl,
+                    },
+                }
+
+                if sysfs_base_file.exists():
+                    try:
+                        base = int(sysfs_base_file.read_text().strip())
+                        entry["sysfs_base"] = base
+                        entry["env"][f"VIRTRTLAB_GPIOBASE{idx}"] = str(base)
+                    except (OSError, ValueError):
+                        warn_msg = (
+                            f"gpio{idx}: sysfs_base unreadable, "
+                            f"omitting VIRTRTLAB_GPIOBASE{idx}"
+                        )
+                        print(f"warning: {warn_msg}", file=sys.stderr)
+                        entry.setdefault("warnings", []).append(warn_msg)
+                else:
+                    warn_msg = (
+                        f"legacy sysfs GPIO ABI unavailable; "
+                        f"VIRTRTLAB_GPIOBASE{idx} omitted"
+                    )
+                    print(f"warning: gpio{idx}: {warn_msg}", file=sys.stderr)
+                    entry.setdefault("warnings", []).append(warn_msg)
+
+                contract.append(entry)
+            gpio_idx += count
+
+    return contract
+
+
+def _print_contract_human(contract: list[dict]) -> None:
+    """Print the AUT integration contract in the spec-mandated human format.
+
+    Env var emission order matches device-contract.md exactly:
+      UART  : VIRTRTLAB_UART<N>
+      GPIO  : VIRTRTLAB_GPIOCHIP<N>, VIRTRTLAB_GPIOBASE<N> (if present), VIRTRTLAB_GPIOCTRL<N>
+    """
+    for entry in contract:
+        name = entry["name"]
+        etype = entry["type"]
+        idx = name[len(etype):]          # e.g. "0" from "uart0" or "gpio0"
+        env = entry.get("env", {})
+        print(f"[ok] {name} loaded")
+        if etype == "uart":
+            print(f"     tty: {entry['aut_path']}")
+            ordered_keys = [f"VIRTRTLAB_UART{idx}"]
+        elif etype == "gpio":
+            print(f"     gpiochip: {entry['chip_path']}")
+            if "sysfs_base" in entry:
+                print(f"     sysfs base: {entry['sysfs_base']}")
+            print(f"     control: {entry['control_path']}")
+            ordered_keys = [
+                f"VIRTRTLAB_GPIOCHIP{idx}",
+                f"VIRTRTLAB_GPIOBASE{idx}",
+                f"VIRTRTLAB_GPIOCTRL{idx}",
+            ]
+        else:
+            ordered_keys = []
+        # Emit known keys in canonical order, then any extra keys sorted.
+        emitted = set()
+        for key in ordered_keys:
+            if key in env:
+                print(f"     export {key}={env[key]}")
+                emitted.add(key)
+        for key in sorted(k for k in env if k not in emitted):
+            print(f"     export {key}={env[key]}")
+        for warning in entry.get("warnings", []):
+            print(f"     [warn] {warning}")
+        print()
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -383,6 +526,11 @@ def cmd_up(args: argparse.Namespace) -> int:
         and _daemon_pid() is not None
     ):
         print("warning: lab already up (modules loaded, daemon running)", file=sys.stderr)
+        contract = _resolve_aut_contract(profile)
+        if args.json:
+            _emit({"devices": contract}, True)
+        else:
+            _print_contract_human(contract)
         return 0
 
     _ensure_run_dir(no_sudo)
@@ -439,13 +587,12 @@ def cmd_up(args: argparse.Namespace) -> int:
     if expected_socks:
         _poll_sockets(expected_socks)
 
+    # Resolve and emit the AUT integration contract
+    contract = _resolve_aut_contract(profile)
     if args.json:
-        _emit(
-            {"status": "up", "modules": all_mod_order, "sockets": [str(s) for s in expected_socks]},
-            True,
-        )
+        _emit({"devices": contract}, True)
     else:
-        print(f"lab up — modules: {', '.join(all_mod_order)}")
+        _print_contract_human(contract)
     return 0
 
 
@@ -659,6 +806,57 @@ def cmd_reset(args: argparse.Namespace) -> int:
     return 0
 
 
+def _valid_line(s: str) -> int:
+    try:
+        v = int(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"line must be an integer, got {s!r}")
+    if not 0 <= v <= 7:
+        raise argparse.ArgumentTypeError(f"line must be 0..7, got {v}")
+    return v
+
+
+def _valid_value(s: str) -> int:
+    try:
+        v = int(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"value must be 0 or 1, got {s!r}")
+    if v not in (0, 1):
+        raise argparse.ArgumentTypeError(f"value must be 0 or 1, got {v}")
+    return v
+
+
+def cmd_inject(args: argparse.Namespace) -> int:
+    device: str = args.device
+    line: int = args.line
+    value: int = args.value
+
+    device_path = Path(SYSFS_ROOT) / "devices" / device
+    if not device_path.is_dir():
+        raise VirtrtlabError(
+            f"device not found: {device} (is the module loaded?)", exit_code=4
+        )
+
+    inject_path = device_path / "inject"
+    if not inject_path.exists():
+        raise VirtrtlabError(
+            f"{device} does not support injection (no 'inject' attribute)", exit_code=4
+        )
+
+    try:
+        inject_path.write_text(f"{line}:{value}")
+    except OSError as exc:
+        raise VirtrtlabError(
+            f"kernel rejected inject on {device} line {line}: {exc.strerror}", exit_code=4
+        ) from exc
+
+    if args.json:
+        _emit({"device": device, "line": line, "value": value, "status": "ok"}, True)
+    else:
+        print(f"{device} line {line} ← {value}")
+    return 0
+
+
 def cmd_daemon(args: argparse.Namespace) -> int:
     subcmd: str = args.daemon_command
     no_sudo: bool = args.no_sudo
@@ -772,6 +970,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p_reset = sub.add_parser("reset", help="Reset stats counters")
     p_reset.add_argument("device", help="Device name")
     p_reset.set_defaults(func=cmd_reset)
+
+    # inject
+    p_inject = sub.add_parser("inject", help="Inject a GPIO line value")
+    p_inject.add_argument("device", help="GPIO device name (e.g. gpio0)")
+    p_inject.add_argument(
+        "line", type=_valid_line, metavar="LINE",
+        help="GPIO line index (0..7)",
+    )
+    p_inject.add_argument(
+        "value", type=_valid_value, metavar="VALUE",
+        help="Physical value to inject (0 or 1)",
+    )
+    p_inject.set_defaults(func=cmd_inject)
 
     # daemon
     p_daemon = sub.add_parser("daemon", help="Manage virtrtlabd independently")

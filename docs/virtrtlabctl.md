@@ -237,6 +237,47 @@ write `reset` to the bus state attribute:
 virtrtlabctl set bus state=reset
 ```
 
+### `inject` — inject a GPIO line value
+
+```
+virtrtlabctl inject <device> <line> <value>
+```
+
+Writes a physical value to a GPIO input line on a VirtRTLab GPIO device. This
+triggers the full 7-step fault injection shim (latency, jitter, drop gate, bitflip
+gate) defined in [sysfs.md](sysfs.md#harness-injection-path).
+
+Arguments:
+
+| Argument | Type | Description |
+|----------|------|-------------|
+| `<device>` | string | GPIO device name as seen in sysfs (e.g. `gpio0`) |
+| `<line>` | integer | Zero-based line index, **0..7** |
+| `<value>` | integer | Physical value to inject: **0** (low) or **1** (high) |
+
+The command resolves the sysfs path
+`/sys/kernel/virtrtlab/devices/<device>/inject` and writes `"<line>:<value>"` to it.
+
+Exit codes:
+
+| Code | Condition |
+|------|-----------|
+| `0` | Injection accepted by the kernel |
+| `2` | `<line>` or `<value>` argument is invalid |
+| `4` | Device not found in sysfs or kernel rejected the write |
+
+Human output example:
+
+```
+gpio0 line 3 ← 1
+```
+
+JSON output example:
+
+```json
+{"device": "gpio0", "line": 3, "value": 1, "status": "ok"}
+```
+
 ### `daemon` — manage `virtrtlabd` independently
 
 ```

@@ -15,9 +15,9 @@
 
 #include <errno.h>
 #include <signal.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <syslog.h>
 #include <sys/epoll.h>
 #include <sys/signalfd.h>
 #include <unistd.h>
@@ -37,7 +37,8 @@ int epoll_loop_create(void)
 
 	fd = epoll_create1(EPOLL_CLOEXEC);
 	if (fd < 0) {
-		perror("epoll_create1");
+		syslog(LOG_ERR, "epoll_create1: %m");
+		closelog();
 		abort();
 	}
 	return fd;
@@ -52,8 +53,9 @@ void epoll_loop_add(int epoll_fd, int fd, uint32_t events, struct evt_ctx *ctx)
 	ev.data.ptr = ctx;
 
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev) < 0) {
-		perror("epoll_ctl ADD");
-		abort(); /* M2: unrecoverable — fd would not be monitored */
+		syslog(LOG_ERR, "epoll_ctl ADD: %m");
+		closelog();
+		abort(); /* unrecoverable — fd would not be monitored */
 	}
 }
 
@@ -67,7 +69,7 @@ void epoll_loop_del(int epoll_fd, int fd)
 	 */
 	if (epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, NULL) < 0) {
 		if (errno != ENOENT && errno != EBADF)
-			perror("epoll_ctl DEL");
+			syslog(LOG_ERR, "epoll_ctl DEL: %m");
 	}
 }
 
@@ -101,9 +103,11 @@ static void on_signal(int sig_fd)
 		n = read(sig_fd, &info, sizeof(info));
 	} while (n < 0 && errno == EINTR);
 
+	syslog(LOG_INFO, "shutting down");
 	for (i = 0; i < g_num_instances; i++)
 		uart_instance_destroy(&g_instances[i], -1);
 
+	closelog();
 	exit(EXIT_SUCCESS);
 }
 
@@ -161,7 +165,7 @@ static void dispatch(struct evt_ctx *ctx, uint32_t events, int epoll_fd)
 		break;
 
 	default:
-		fprintf(stderr, "virtrtlabd: unknown fd_role %d\n", ctx->role);
+		syslog(LOG_ERR, "unknown fd_role %d", ctx->role);
 		break;
 	}
 }
@@ -179,7 +183,7 @@ void epoll_loop_run(int epoll_fd)
 		if (n < 0) {
 			if (errno == EINTR)
 				continue; /* spurious wakeup; signalfd handles signals */
-			perror("epoll_wait");
+			syslog(LOG_ERR, "epoll_wait: %m");
 			break;
 		}
 

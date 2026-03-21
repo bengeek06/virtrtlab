@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <syslog.h>
 #include <sys/epoll.h>
 #include <sys/signalfd.h>
 #include <sys/stat.h>
@@ -117,20 +118,16 @@ static int mkdir_rundir(const char *path)
 
 	if (mkdir(path, 0755) < 0) {
 		if (errno != EEXIST) {
-			fprintf(stderr, "virtrtlabd: mkdir %s: %s\n",
-				path, strerror(errno));
+			syslog(LOG_ERR, "mkdir %s: %m", path);
 			return -1;
 		}
 		/* Path already exists — verify it is a directory. */
 		if (stat(path, &st) < 0) {
-			fprintf(stderr, "virtrtlabd: stat %s: %s\n",
-				path, strerror(errno));
+			syslog(LOG_ERR, "stat %s: %m", path);
 			return -1;
 		}
 		if (!S_ISDIR(st.st_mode)) {
-			fprintf(stderr,
-				"virtrtlabd: %s exists but is not a directory\n",
-				path);
+			syslog(LOG_ERR, "%s exists but is not a directory", path);
 			return -1;
 		}
 	}
@@ -155,13 +152,13 @@ static int setup_signalfd(void)
 	sigaddset(&mask, SIGINT);
 
 	if (sigprocmask(SIG_BLOCK, &mask, NULL) < 0) {
-		perror("sigprocmask");
+		syslog(LOG_ERR, "sigprocmask: %m");
 		return -1;
 	}
 
 	fd = signalfd(-1, &mask, SFD_CLOEXEC);
 	if (fd < 0) {
-		perror("signalfd");
+		syslog(LOG_ERR, "signalfd: %m");
 		return -1;
 	}
 
@@ -183,18 +180,25 @@ int main(int argc, char *argv[])
 	if (parse_args(argc, argv, &num_uarts, &run_dir) < 0)
 		return EXIT_FAILURE;
 
+	openlog("virtrtlabd", LOG_PID, LOG_DAEMON);
+	syslog(LOG_INFO, "starting: num_uarts=%d run_dir=%s", num_uarts, run_dir);
+
 	/*
 	 * Ignore SIGPIPE globally: write/send to a closed socket returns
 	 * EPIPE instead of killing the process.  Handlers check errno.
 	 */
 	signal(SIGPIPE, SIG_IGN);
 
-	if (mkdir_rundir(run_dir) < 0)
+	if (mkdir_rundir(run_dir) < 0) {
+		closelog();
 		return EXIT_FAILURE;
+	}
 
 	sig_fd = setup_signalfd();
-	if (sig_fd < 0)
+	if (sig_fd < 0) {
+		closelog();
 		return EXIT_FAILURE;
+	}
 
 	epoll_fd = epoll_loop_create();
 
@@ -214,15 +218,18 @@ int main(int argc, char *argv[])
 	 */
 	for (i = 0; i < num_uarts; i++) {
 		if (uart_instance_init(&instances[i], i, epoll_fd, run_dir) < 0) {
-			fprintf(stderr,
-				"virtrtlabd: failed to initialise uart%d — "
-				"is virtrtlab_uart loaded with num_uarts>=%d?\n",
+			syslog(LOG_ERR,
+				"failed to initialise uart%d — "
+				"is virtrtlab_uart loaded with num_uarts>=%d?",
 				i, i + 1);
 			/* Destroy already-initialised instances in reverse order. */
 			while (--i >= 0)
 				uart_instance_destroy(&instances[i], epoll_fd);
-			close(sig_fd);
-			close(epoll_fd);
+			if (close(sig_fd) < 0)
+				syslog(LOG_WARNING, "failed to close signalfd: %m");
+			if (close(epoll_fd) < 0)
+				syslog(LOG_WARNING, "failed to close epoll fd: %m");
+			closelog();
 			return EXIT_FAILURE;
 		}
 	}

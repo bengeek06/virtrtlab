@@ -630,6 +630,36 @@ static ssize_t chip_path_show(struct device *dev, struct device_attribute *attr,
 }
 static DEVICE_ATTR_RO(chip_path);
 
+#ifdef CONFIG_GPIO_SYSFS
+/*
+ * sysfs_base_show - expose the first legacy GPIO number of this bank.
+ *
+ * After gpiochip_add_data() returns, gc.base holds the first number in
+ * the system GPIO numberspace assigned to this chip.  Line offset L maps
+ * to /sys/class/gpio/gpio<sysfs_base+L>/ in the standard Linux GPIO sysfs
+ * ABI.  The attribute is compiled in only when CONFIG_GPIO_SYSFS is set;
+ * if the host kernel disables the legacy ABI the attr is entirely absent.
+ *
+ * gc.base is set once by gpiolib and never changed afterward, so reading
+ * it here without the device lock is safe after registration completes.
+ */
+static ssize_t sysfs_base_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct virtrtlab_gpio_dev *gdev = to_gpio_dev(dev);
+
+	/*
+	 * gc.base < 0 is unreachable in practice: gpiolib always assigns a
+	 * non-negative base on successful gpiochip_add_data().  Guard kept
+	 * for defence in depth; return -ENODATA ("no data available") rather
+	 * than -EPERM which incorrectly implies a permission problem.
+	 */
+	if (gdev->gc.base < 0)
+		return -ENODATA;
+	return sysfs_emit(buf, "%u\n", (u32)gdev->gc.base);
+}
+static DEVICE_ATTR_RO(sysfs_base);
+#endif /* CONFIG_GPIO_SYSFS */
+
 /* -------------------------------------------------------------------------
  * [8] Stats subdir attributes
  *
@@ -714,6 +744,9 @@ static struct attribute *gpio_dev_attrs[] = {
 	&dev_attr_bus.attr,
 	&dev_attr_num_lines.attr,
 	&dev_attr_chip_path.attr,
+#ifdef CONFIG_GPIO_SYSFS
+	&dev_attr_sysfs_base.attr,
+#endif
 	&dev_attr_inject.attr,
 	&dev_attr_enabled.attr,
 	&dev_attr_latency_ns.attr,

@@ -182,7 +182,23 @@ class TestFindKo:
         assert result.name == "virtrtlab_core.ko"
 
     def test_not_found_exit1(self, tmp_path, monkeypatch):
+        """_find_ko raises VirtrtlabError(exit_code=1) when .ko is nowhere.
+
+        modinfo and uname are stubbed so that installed system modules
+        (if any) cannot be discovered by the fallback paths.
+        """
         monkeypatch.chdir(tmp_path)
+        # Prevent modinfo from finding an installed module on the test machine.
+        import subprocess as _sp
+        original_run = _sp.run
+        def _fake_run(cmd, **kwargs):
+            if cmd[0] == "modinfo":
+                raise _sp.SubprocessError("stubbed")
+            return original_run(cmd, **kwargs)
+        monkeypatch.setattr(_sp, "run", _fake_run)
+        # Also prevent check_output(uname -r) from returning a real path.
+        monkeypatch.setattr(_sp, "check_output",
+                            lambda *a, **kw: (_ for _ in ()).throw(_sp.SubprocessError("stubbed")))
         with pytest.raises(ctl.VirtrtlabError) as exc_info:
             ctl._find_ko("virtrtlab_uart", str(tmp_path))
         assert exc_info.value.exit_code == 1

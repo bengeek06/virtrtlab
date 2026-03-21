@@ -358,3 +358,76 @@ class TestGpioLargeJitter:
         w(g(0, "jitter_ns"),  "5000000000") # 5 s amplitude — timer fires async
         result = w(g(0, "inject"), "0:1")
         assert result == 0, "inject with large jitter must succeed"
+
+
+# ---------------------------------------------------------------------------
+# [AC-8] sysfs_base — legacy GPIO numberspace base (issue #43)
+# ---------------------------------------------------------------------------
+
+class TestGpioSysfsBase:
+    """
+    sysfs_base exposes the first global GPIO number assigned to this bank by
+    gpiolib.  Line offset L maps to /sys/class/gpio/gpio<sysfs_base+L>/.
+
+    The attribute is absent when CONFIG_GPIO_SYSFS is disabled in the host
+    kernel.  When present it must be a non-negative decimal integer.
+    """
+
+    LEGACY_GPIO_ROOT = "/sys/class/gpio"
+
+    def _has_legacy_sysfs(self):
+        return os.path.isdir(self.LEGACY_GPIO_ROOT)
+
+    def test_sysfs_base_attr_exists_or_absent(self, gpio_module):
+        """sysfs_base exists when legacy GPIO ABI is available, absent otherwise."""
+        attr_path = g(0, "sysfs_base")
+        if self._has_legacy_sysfs():
+            assert os.path.exists(attr_path), (
+                "sysfs_base attr must exist when /sys/class/gpio is present"
+            )
+        else:
+            assert not os.path.exists(attr_path), (
+                "sysfs_base attr must be absent when /sys/class/gpio is missing"
+            )
+
+    def test_sysfs_base_is_nonnegative_integer(self, gpio_module):
+        """sysfs_base must read as a non-negative decimal integer."""
+        attr_path = g(0, "sysfs_base")
+        if not os.path.exists(attr_path):
+            pytest.skip("sysfs_base absent: legacy GPIO ABI not available")
+        val = int(r(attr_path))
+        assert val >= 0, f"sysfs_base must be >= 0, got {val}"
+
+    def test_sysfs_base_maps_to_gpiochip_dir(self, gpio_module):
+        """The gpiochip<base> directory must exist and its 'base' attr must match.
+
+        Individual gpio<N>/ dirs only exist after an explicit export; what is
+        created automatically at chip registration is /sys/class/gpio/gpiochip<base>/
+        with a readable 'base' attribute that must equal sysfs_base.
+        """
+        attr_path = g(0, "sysfs_base")
+        if not os.path.exists(attr_path):
+            pytest.skip("sysfs_base absent: legacy GPIO ABI not available")
+        base = int(r(attr_path))
+        chip_dir = os.path.join(self.LEGACY_GPIO_ROOT, f"gpiochip{base}")
+        assert os.path.isdir(chip_dir), (
+            f"Expected gpiochip directory {chip_dir} to exist "
+            f"(sysfs_base={base})"
+        )
+        chip_base_file = os.path.join(chip_dir, "base")
+        assert os.path.exists(chip_base_file), (
+            f"{chip_dir}/base not found"
+        )
+        chip_base = int(r(chip_base_file))
+        assert chip_base == base, (
+            f"gpiochip{base}/base={chip_base} does not match sysfs_base={base}"
+        )
+
+    def test_sysfs_base_is_stable_after_reload(self, gpio_module):
+        """sysfs_base does not change between two reads (no PRNG draw)."""
+        attr_path = g(0, "sysfs_base")
+        if not os.path.exists(attr_path):
+            pytest.skip("sysfs_base absent: legacy GPIO ABI not available")
+        first  = r(attr_path)
+        second = r(attr_path)
+        assert first == second, "sysfs_base must be stable across reads"

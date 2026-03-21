@@ -87,12 +87,23 @@ class TestCmdUp:
         assert "already up" in r.stderr.lower() or r.returncode == 0
 
     def test_up_json_output(self, tmp_path):
+        """cmd_up --json emits the AUT integration contract (device-contract.md).
+
+        The top-level key is 'devices', each entry has 'name', 'type', and 'env'.
+        There is no 'status' key — status is represented by exit code 0.
+        """
         toml = _write_lab_toml(tmp_path)
         r = run_ctl("--json", "up", "--config", toml)
         assert r.returncode == 0
         data = json.loads(r.stdout)
-        assert data["status"] == "up"
-        assert "modules" in data
+        assert "devices" in data, f"expected 'devices' key, got: {list(data.keys())}"
+        assert len(data["devices"]) >= 1
+        device = data["devices"][0]
+        assert device["type"] == "uart"
+        assert device["name"] == "uart0"
+        assert "aut_path" in device
+        assert "env" in device
+        assert "VIRTRTLAB_UART0" in device["env"]
 
 
 class TestCmdDown:

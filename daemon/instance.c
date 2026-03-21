@@ -27,6 +27,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <syslog.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -43,8 +44,7 @@ static int wire_open(struct uart_instance *inst)
 
 	fd = open(inst->wire_path, O_RDWR | O_CLOEXEC);
 	if (fd < 0)
-		fprintf(stderr, "virtrtlabd: cannot open %s: %s\n",
-			inst->wire_path, strerror(errno));
+		syslog(LOG_ERR, "cannot open %s: %m", inst->wire_path);
 	return fd;
 }
 
@@ -58,7 +58,8 @@ static int wire_open(struct uart_instance *inst)
 static int wire_reopen(struct uart_instance *inst, int epoll_fd)
 {
 	epoll_loop_del(epoll_fd, inst->wire_fd);
-	close(inst->wire_fd);
+	if (close(inst->wire_fd) < 0)
+		syslog(LOG_WARNING, "uart%d: close wire_fd: %m", inst->idx);
 	inst->wire_fd = wire_open(inst);
 	return inst->wire_fd;
 }
@@ -68,7 +69,8 @@ static void client_close(struct uart_instance *inst, int epoll_fd)
 	if (inst->client_fd < 0)
 		return;
 	epoll_loop_del(epoll_fd, inst->client_fd);
-	close(inst->client_fd);
+	if (close(inst->client_fd) < 0)
+		syslog(LOG_WARNING, "uart%d: close client_fd: %m", inst->idx);
 	inst->client_fd = -1;
 }
 
@@ -115,7 +117,7 @@ int uart_instance_init(struct uart_instance *inst, int idx,
 
 	inst->server_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
 	if (inst->server_fd < 0) {
-		perror("socket");
+		syslog(LOG_ERR, "uart%d: socket: %m", inst->idx);
 		goto err_wire;
 	}
 
@@ -129,8 +131,8 @@ int uart_instance_init(struct uart_instance *inst, int idx,
 	 * make unlink() in destroy() miss the real file.
 	 */
 	if (strlen(inst->sock_path) >= sizeof(addr.sun_path)) {
-		fprintf(stderr,
-			"virtrtlabd: uart%d: socket path too long (max %zu): %s\n",
+		syslog(LOG_ERR,
+			"uart%d: socket path too long (max %zu): %s",
 			inst->idx, sizeof(addr.sun_path) - 1, inst->sock_path);
 		goto err_server;
 	}
@@ -138,12 +140,12 @@ int uart_instance_init(struct uart_instance *inst, int idx,
 
 	if (bind(inst->server_fd,
 		 (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-		perror("bind");
+		syslog(LOG_ERR, "uart%d: bind %s: %m", inst->idx, inst->sock_path);
 		goto err_server;
 	}
 
 	if (listen(inst->server_fd, 1) < 0) {
-		perror("listen");
+		syslog(LOG_ERR, "uart%d: listen: %m", inst->idx);
 		goto err_bound;
 	}
 
@@ -153,15 +155,18 @@ int uart_instance_init(struct uart_instance *inst, int idx,
 	 * does not watch it until a simulator connects.
 	 */
 	epoll_loop_add(epoll_fd, inst->server_fd, EPOLLIN, &inst->ctx_server);
+	syslog(LOG_INFO, "uart%d: ready on %s", inst->idx, inst->sock_path);
 	return 0;
 
 err_bound:
 	unlink(inst->sock_path);
 err_server:
-	close(inst->server_fd);
+	if (close(inst->server_fd) < 0)
+		syslog(LOG_WARNING, "uart%d: close server_fd: %m", inst->idx);
 	inst->server_fd = -1;
 err_wire:
-	close(inst->wire_fd);
+	if (close(inst->wire_fd) < 0)
+		syslog(LOG_WARNING, "uart%d: close wire_fd: %m", inst->idx);
 	inst->wire_fd = -1;
 	return -1;
 }
@@ -177,15 +182,18 @@ void uart_instance_destroy(struct uart_instance *inst, int epoll_fd)
 	unlink(inst->sock_path);
 
 	if (inst->client_fd >= 0) {
-		close(inst->client_fd);
+		if (close(inst->client_fd) < 0)
+			syslog(LOG_WARNING, "uart%d: close client_fd: %m", inst->idx);
 		inst->client_fd = -1;
 	}
 	if (inst->server_fd >= 0) {
-		close(inst->server_fd);
+		if (close(inst->server_fd) < 0)
+			syslog(LOG_WARNING, "uart%d: close server_fd: %m", inst->idx);
 		inst->server_fd = -1;
 	}
 	if (inst->wire_fd >= 0) {
-		close(inst->wire_fd);
+		if (close(inst->wire_fd) < 0)
+			syslog(LOG_WARNING, "uart%d: close wire_fd: %m", inst->idx);
 		inst->wire_fd = -1;
 	}
 }
@@ -220,7 +228,7 @@ static void close_client_and_drain(struct uart_instance *inst, int epoll_fd)
 	if (fl_save < 0 ||
 	    fcntl(inst->wire_fd, F_SETFL, fl_save | O_NONBLOCK) < 0) {
 		/* B3: cannot set O_NONBLOCK; skip drain to avoid blocking. */
-		perror("drain: fcntl O_NONBLOCK");
+		syslog(LOG_WARNING, "uart%d: drain: fcntl O_NONBLOCK: %m", inst->idx);
 		enter_wait_client(inst, epoll_fd);
 		return;
 	}
@@ -234,7 +242,9 @@ static void close_client_and_drain(struct uart_instance *inst, int epoll_fd)
 			 * EOF: wire device was reset between simulator
 			 * disconnect and drain — reopen fresh.
 			 */
-			close(inst->wire_fd);
+			if (close(inst->wire_fd) < 0)
+				syslog(LOG_WARNING, "uart%d: close wire_fd (drain-reopen): %m",
+				       inst->idx);
 			inst->wire_fd = wire_open(inst);
 			if (inst->wire_fd < 0)
 				return; /* wire lost; instance stays with no wire */
@@ -242,13 +252,13 @@ static void close_client_and_drain(struct uart_instance *inst, int epoll_fd)
 		}
 		/* r < 0 */
 		if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EIO)
-			perror("drain wire");
+			syslog(LOG_WARNING, "uart%d: drain wire: %m", inst->idx);
 		break; /* EAGAIN / EIO: drain complete */
 	}
 
 	/* Restore original flags before re-entering WAIT_CLIENT. */
 	if (fcntl(inst->wire_fd, F_SETFL, fl_save) < 0)
-		perror("drain: restore fcntl");
+		syslog(LOG_WARNING, "uart%d: drain: restore fcntl: %m", inst->idx);
 
 	enter_wait_client(inst, epoll_fd);
 }
@@ -275,7 +285,7 @@ void on_server_readable(struct uart_instance *inst, int epoll_fd)
 
 	fd = accept4(inst->server_fd, NULL, NULL, SOCK_CLOEXEC);
 	if (fd < 0) {
-		perror("accept4");
+		syslog(LOG_ERR, "uart%d: accept4: %m", inst->idx);
 		return;
 	}
 
@@ -319,7 +329,7 @@ void on_wire_readable(struct uart_instance *inst, int epoll_fd)
 			usleep(10000);
 			return;
 		}
-		perror("read wire");
+		syslog(LOG_WARNING, "uart%d: read wire: %m", inst->idx);
 		return;
 	}
 
@@ -330,8 +340,7 @@ void on_wire_readable(struct uart_instance *inst, int epoll_fd)
 		 */
 		if (wire_reopen(inst, epoll_fd) < 0) {
 			/* m1: wire device lost permanently — take instance offline. */
-			fprintf(stderr, "virtrtlabd: uart%d: wire lost, going offline\n",
-				inst->idx);
+			syslog(LOG_ERR, "uart%d: wire lost, going offline", inst->idx);
 			client_close(inst, epoll_fd);
 			uart_instance_destroy(inst, epoll_fd);
 			return;
@@ -354,9 +363,9 @@ void on_wire_readable(struct uart_instance *inst, int epoll_fd)
 
 	if (nw < 0) {
 		if (errno != EPIPE && errno != ECONNRESET)
-			perror("send client");
+			syslog(LOG_WARNING, "uart%d: send client: %m", inst->idx);
 	} else {
-		fprintf(stderr, "virtrtlabd: uart%d: partial send (%zd/%zd), dropping client\n",
+		syslog(LOG_WARNING, "uart%d: partial send (%zd/%zd), dropping client",
 			inst->idx, nw, n);
 	}
 	close_client_and_drain(inst, epoll_fd);
@@ -384,7 +393,7 @@ void on_client_readable(struct uart_instance *inst, int epoll_fd)
 
 	if (n < 0) {
 		if (errno != ECONNRESET && errno != ENOTCONN)
-			perror("recv client");
+			syslog(LOG_WARNING, "uart%d: recv client: %m", inst->idx);
 		close_client_and_drain(inst, epoll_fd);
 		return;
 	}
@@ -396,6 +405,6 @@ void on_client_readable(struct uart_instance *inst, int epoll_fd)
 	 */
 	if (write(inst->wire_fd, inst->sock_buf, (size_t)n) < 0) {
 		if (errno != EAGAIN)
-			perror("write wire");
+			syslog(LOG_WARNING, "uart%d: write wire: %m", inst->idx);
 	}
 }

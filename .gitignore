@@ -20,6 +20,9 @@ __pycache__/
 *.pyc
 .venv/
 
+# Tests
+.pytest_cache/
+
 # OS/editor
 .DS_Store
 .vscode/
