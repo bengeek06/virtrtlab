@@ -471,7 +471,7 @@ ships an AUT (application-under-test) and a companion harness:
 | Example | Bug | Fault |
 |---|---|---|
 | [`aut_uart_timeout`](examples/aut_uart_timeout/) | `read()` with no timeout | Harness drops 1 byte → AUT blocks forever |
-| [`aut_gpio_polarity`](examples/aut_gpio_polarity/) | Wrong edge polarity (RISING vs FALLING) | Harness drives falling edge → AUT misses event |
+| [`aut_gpio_polarity`](examples/aut_gpio_polarity/) | Active-LOW check on an active-HIGH signal | Harness pre-sets line HIGH → buggy AUT never detects ready |
 | [`aut_uart_statemachine`](examples/aut_uart_statemachine/) | State machine without RESET state | Harness injects extra byte → AUT enters bad state |
 
 ```sh

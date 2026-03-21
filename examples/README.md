@@ -14,8 +14,8 @@ VirtRTLab fault-injection workflow end to end.  Each example has:
 
 | Example | Peripheral | Bug | Fault injected | Observable failure |
 |---|---|---|---|---|
-| `aut_uart_timeout` | UART | `read()` with VMIN=4, VTIME=0 (no timeout) | Harness drops the last byte of the 4-byte frame | AUT blocks forever |
-| `aut_gpio_polarity` | GPIO | Subscribes to RISING edge; signal is FALLING | Harness drives 1→0 instead of 0→1 | AUT times out, misses the event |
+| `aut_uart_timeout` | UART | `read()` with VMIN=1, VTIME=0 (no timeout) | Harness drops the last byte of the 4-byte frame | AUT blocks forever |
+| `aut_gpio_polarity` | GPIO | Active-LOW check (`val == 0`) on an active-HIGH signal | Harness pre-sets line HIGH (1); buggy AUT never detects "ready" | AUT times out (exit 1) |
 | `aut_uart_statemachine` | UART | State machine has no RESET state | Harness injects an extra byte before the checksum | AUT exits 2 (bad state) |
 
 ---
@@ -82,7 +82,7 @@ examples/aut_uart_timeout/harness.sh
 **Bug location**: `aut.c`, termios configuration.
 
 ```c
-tio.c_cc[VMIN]  = 4;
+tio.c_cc[VMIN]  = 1;
 tio.c_cc[VTIME] = 0;   /* BUG: no inter-character timeout */
 ```
 
@@ -97,20 +97,19 @@ relay behaviour.
 
 ---
 
-### `aut_gpio_polarity` — wrong edge polarity
+### `aut_gpio_polarity` — wrong active-level polarity
 
-**Bug location**: `aut.c`, GPIO v2 line request.
+**Bug location**: `aut.c`, GPIO polling condition.
 
 ```c
-req.config.flags = GPIO_V2_LINE_FLAG_INPUT |
-                   GPIO_V2_LINE_FLAG_EDGE_RISING;  /* BUG: signal is FALLING */
+if (val == 0) { /* BUG: should be == 1 — signal is active-HIGH */
 ```
 
-The physical signal of interest goes from 1 → 0 (falling).  The AUT registers
-only for rising edges and therefore never receives the event.
+The line goes HIGH (1) to indicate "device ready".  The AUT polls every
+100 ms checking `if (val == 0)` — active-LOW logic — and therefore never
+detects the ready condition when the line is actually asserted (HIGH).
 
-**Fix**: subscribe to `GPIO_V2_LINE_FLAG_EDGE_FALLING` (or both edges) and
-filter on `event.id`.
+**Fix**: change the condition to `if (val == 1)`.
 
 See also: [`docs/sysfs.md` — GPIO inject attr](../docs/sysfs.md) — how
 `virtrtlabctl inject` drives input transitions through the fault-injection shim.

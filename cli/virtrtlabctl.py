@@ -360,6 +360,15 @@ def _poll_sockets(sock_paths: list[Path], timeout: float = 5.0) -> None:
         time.sleep(0.1)
 
 
+def _run_perm(cmd: list[str]) -> None:
+    """Run a permission-adjustment command; warn on failure instead of silently discarding."""
+    r = subprocess.run(cmd, capture_output=True)
+    if r.returncode != 0:
+        msg = r.stderr.decode(errors="replace").strip()
+        print(f"warning: permission fix failed ({' '.join(cmd[-3:])}): {msg}",
+              file=sys.stderr)
+
+
 def _expected_sockets(profile: dict) -> list[Path]:
     """Return expected socket paths for UART devices in the profile."""
     run = Path(RUN_DIR)
@@ -605,28 +614,16 @@ def cmd_up(args: argparse.Namespace) -> int:
         # Fix socket ownership/permissions so users in the virtrtlab group
         # can connect without running as root (srwxr-xr-x → srwx-rw---).
         for sock in expected_socks:
-            subprocess.run(
-                prefix + ["chown", "root:virtrtlab", str(sock)],
-                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            subprocess.run(
-                prefix + ["chmod", "660", str(sock)],
-                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
+            _run_perm(prefix + ["chown", "root:virtrtlab", str(sock)])
+            _run_perm(prefix + ["chmod", "660", str(sock)])
 
     # Fix GPIO inject sysfs attribute permissions so that users in the
     # virtrtlab group can write them without running as root (--w------- → --w--w----).
     devices_dir = Path(SYSFS_ROOT) / "devices"
     if devices_dir.is_dir():
         for inject_file in sorted(devices_dir.glob("*/inject")):
-            subprocess.run(
-                prefix + ["chown", "root:virtrtlab", str(inject_file)],
-                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            subprocess.run(
-                prefix + ["chmod", "220", str(inject_file)],
-                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
+            _run_perm(prefix + ["chown", "root:virtrtlab", str(inject_file)])
+            _run_perm(prefix + ["chmod", "220", str(inject_file)])
 
         # Fix /dev/gpiochipN character device permissions so virtrtlab group
         # can open the device and issue GPIO v2 ioctls (crw------- → crw-rw----).
@@ -636,14 +633,8 @@ def cmd_up(args: argparse.Namespace) -> int:
             except OSError:
                 chip_path = ""
             if chip_path:
-                subprocess.run(
-                    prefix + ["chown", "root:virtrtlab", chip_path],
-                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-                subprocess.run(
-                    prefix + ["chmod", "660", chip_path],
-                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
+                _run_perm(prefix + ["chown", "root:virtrtlab", chip_path])
+                _run_perm(prefix + ["chmod", "660", chip_path])
 
     # Resolve and emit the AUT integration contract
     contract = _resolve_aut_contract(profile)

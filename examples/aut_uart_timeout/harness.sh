@@ -5,8 +5,9 @@
 #
 # Scenario
 # --------
-#   The AUT opens a UART, sets VMIN=4 VTIME=0 (no read timeout), writes a
-#   READY byte (0x55) and then blocks waiting for exactly 4 bytes.
+#   The AUT opens a UART, sets VMIN=1 VTIME=0 (no read timeout), writes a
+#   READY byte (0x55) and then reads 4 data bytes one by one, each blocking
+#   until a byte is available.
 #
 #   Baseline: the harness (acting as the UART simulator) sends all 4 bytes.
 #             The AUT verifies the checksum and exits 0.
@@ -20,8 +21,8 @@
 #
 #   Without arguments: fault mode.
 #     Sends 3 of 4 bytes — the AUT hangs.
-#     Exits 0 if the AUT was killed as expected (PASS).
-#     Exits 1 if the AUT somehow completed (FAIL).
+#     Exits non-zero (AUT exit code) when the AUT is killed as expected (PASS).
+#     Exits 1 if the AUT somehow completed without fault (FAIL).
 #
 #   With --baseline: baseline mode.
 #     Sends all 4 bytes — the AUT completes cleanly.
@@ -55,7 +56,7 @@ fi
 # ---------------------------------------------------------------------------
 while IFS= read -r kv; do
     export "$kv"
-done < <(virtrtlabctl up --uart 1 2>/dev/null | grep -oE 'VIRTRTLAB_[A-Z0-9]+=[^ ]+')
+done < <(virtrtlabctl up --uart 1 | grep -oE 'VIRTRTLAB_[A-Z0-9]+=[^ ]+')
 
 if [[ -z "${VIRTRTLAB_UART0:-}" ]]; then
     echo "FAIL: virtrtlabctl up --uart 1 did not export VIRTRTLAB_UART0"

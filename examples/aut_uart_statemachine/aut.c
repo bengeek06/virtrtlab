@@ -66,10 +66,12 @@ cfsetispeed(&tio, B9600);
 cfsetospeed(&tio, B9600);
 
 /*
- * Read one byte at a time; VTIME=30 (3 s inactivity timeout) prevents
- * a permanent hang if the simulator disconnects unexpectedly.
+ * Read one byte at a time with a 3 s inactivity timeout:
+ * VMIN=0, VTIME=30 ensures read() will return 0 if no data
+ * arrives (including before the first byte), avoiding a
+ * permanent hang if the simulator disconnects unexpectedly.
  */
-tio.c_cc[VMIN]  = 1;
+tio.c_cc[VMIN]  = 0;
 tio.c_cc[VTIME] = 30;
 
 if (tcsetattr(fd, TCSANOW, &tio) < 0) {

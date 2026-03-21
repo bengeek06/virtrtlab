@@ -53,7 +53,7 @@ fi
 # ---------------------------------------------------------------------------
 while IFS= read -r kv; do
     export "$kv"
-done < <(virtrtlabctl up --uart 1 2>/dev/null | grep -oE 'VIRTRTLAB_[A-Z0-9]+=[^ ]+')
+done < <(virtrtlabctl up --uart 1 | grep -oE 'VIRTRTLAB_[A-Z0-9]+=[^ ]+')
 
 if [[ -z "${VIRTRTLAB_UART0:-}" ]]; then
     echo "FAIL: virtrtlabctl up --uart 1 did not export VIRTRTLAB_UART0"
