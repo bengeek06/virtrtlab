@@ -45,28 +45,52 @@ virtrtlabctl up [--config FILE] [--uart N] [--gpio N]
 4. Waits up to 5 s for all daemon sockets to appear.
 5. Emits the AUT integration contract on stdout.
 
-**Output (shell format, default):**
+**Output (human-readable, default):**
 
-```sh
-VIRTRTLAB_UART_TTY=ttyVIRTLAB0
-VIRTRTLAB_UART_SOCK=/run/virtrtlab/uart0.sock
-VIRTRTLAB_GPIO_CHIP=/dev/gpiochip4
-VIRTRTLAB_GPIO_SYSFS_BASE=496
+One block per device showing the resolved paths and `export KEY=VALUE` lines:
+
+```
+[ok] uart0 loaded
+     tty: /dev/ttyVIRTLAB0
+     export VIRTRTLAB_UART0=/dev/ttyVIRTLAB0
+
+[ok] gpio0 loaded
+     gpiochip: /dev/gpiochip4
+     sysfs base: 496
+     control: /sys/kernel/virtrtlab/devices/gpio0
+     export VIRTRTLAB_GPIOCHIP0=/dev/gpiochip4
+     export VIRTRTLAB_GPIOBASE0=496
+     export VIRTRTLAB_GPIOCTRL0=/sys/kernel/virtrtlab/devices/gpio0
 ```
 
-Use `eval $()` to export these into your shell session:
-
-```sh
-eval $(sudo virtrtlabctl up --uart 1 --gpio 1)
-```
+> `VIRTRTLAB_GPIOBASE<N>` is omitted with a warning if the legacy sysfs GPIO ABI
+> (`CONFIG_GPIO_SYSFS`) is not available on the host kernel.
 
 **Output (JSON, with `--json`):**
 
 ```json
 {
   "devices": [
-    {"type": "uart", "index": 0, "tty": "ttyVIRTLAB0", "sock": "/run/virtrtlab/uart0.sock"},
-    {"type": "gpio", "index": 0, "chip": "/dev/gpiochip4", "sysfs_base": 496}
+    {
+      "name": "uart0",
+      "type": "uart",
+      "aut_path": "/dev/ttyVIRTLAB0",
+      "wire_path": "/dev/virtrtlab-wire0",
+      "socket_path": "/run/virtrtlab/uart0.sock",
+      "env": {"VIRTRTLAB_UART0": "/dev/ttyVIRTLAB0"}
+    },
+    {
+      "name": "gpio0",
+      "type": "gpio",
+      "chip_path": "/dev/gpiochip4",
+      "control_path": "/sys/kernel/virtrtlab/devices/gpio0",
+      "sysfs_base": 496,
+      "env": {
+        "VIRTRTLAB_GPIOCHIP0": "/dev/gpiochip4",
+        "VIRTRTLAB_GPIOBASE0": "496",
+        "VIRTRTLAB_GPIOCTRL0": "/sys/kernel/virtrtlab/devices/gpio0"
+      }
+    }
   ]
 }
 ```
@@ -353,8 +377,8 @@ virtrtlabctl inject gpio0 1 1
 | Code | Meaning |
 |---|---|
 | 0 | Injection accepted |
-| 2 | Device not found |
-| 1 | Invalid line or value |
+| 2 | Invalid line or value (bad argument) |
+| 4 | Device not found, inject not supported, or kernel rejected |
 
 ---
 
@@ -429,8 +453,9 @@ sudo virtrtlabctl up --config lab.toml
 ## Complete fault injection example
 
 ```sh
-# 1. Bring up the lab
-eval $(sudo virtrtlabctl up --uart 1 --gpio 1)
+# 1. Bring up the lab (human-readable output; set env vars from the export lines)
+sudo virtrtlabctl up --uart 1 --gpio 1
+export VIRTRTLAB_UART0=/dev/ttyVIRTLAB0
 
 # 2. Confirm lab state
 virtrtlabctl status
@@ -443,7 +468,7 @@ virtrtlabctl set uart0 drop_rate_ppm=20000 latency_ns=100000
 socat - UNIX-CONNECT:/run/virtrtlab/uart0.sock &
 
 # 5. Run your AUT (10 s timeout)
-timeout 10 "$AUT_BINARY" "$VIRTRTLAB_UART_TTY"
+timeout 10 "$AUT_BINARY" "$VIRTRTLAB_UART0"
 echo "AUT exit: $?"
 
 # 6. Check stats
@@ -464,9 +489,10 @@ sudo virtrtlabctl down
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 1 | General error (load failure, daemon error, write rejected) |
-| 2 | Not found (device, attribute, module) |
-| 3 | Daemon not running (used by `daemon status`) |
+| 1 | Operational error (module load failure, daemon error, filesystem error) |
+| 2 | Bad argument or profile error (invalid syntax, unknown device type) |
+| 3 | Timeout waiting for sockets; `daemon status` → stopped; `daemon start` → already running |
+| 4 | Not found or kernel rejected (device, attribute, inject path) |
 
 ---
 

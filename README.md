@@ -221,16 +221,23 @@ sudo virtrtlabctl up --uart 1 --gpio 1
 This loads `virtrtlab_core`, `virtrtlab_uart`, `virtrtlab_gpio`, and starts `virtrtlabd`. Output:
 
 ```
-VIRTRTLAB_UART_TTY=ttyVIRTLAB0
-VIRTRTLAB_UART_SOCK=/run/virtrtlab/uart0.sock
-VIRTRTLAB_GPIO_CHIP=/dev/gpiochip4
-VIRTRTLAB_GPIO_SYSFS_BASE=496
+[ok] uart0 loaded
+     tty: /dev/ttyVIRTLAB0
+     export VIRTRTLAB_UART0=/dev/ttyVIRTLAB0
+
+[ok] gpio0 loaded
+     gpiochip: /dev/gpiochip4
+     sysfs base: 496
+     control: /sys/kernel/virtrtlab/devices/gpio0
+     export VIRTRTLAB_GPIOCHIP0=/dev/gpiochip4
+     export VIRTRTLAB_GPIOBASE0=496
+     export VIRTRTLAB_GPIOCTRL0=/sys/kernel/virtrtlab/devices/gpio0
 ```
 
-Export these variables so your AUT finds its devices:
+Use `--json` to get machine-readable output:
 
 ```sh
-eval $(sudo virtrtlabctl up --uart 1 --gpio 1)
+sudo virtrtlabctl --json up --uart 1 --gpio 1
 ```
 
 ### 2 — Verify the lab
