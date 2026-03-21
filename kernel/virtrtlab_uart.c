@@ -784,7 +784,7 @@ static ssize_t virtrtlab_tty_write_common(struct tty_struct *tty,
 	return copied;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
 static ssize_t virtrtlab_tty_write(struct tty_struct *tty, const u8 *buf,
 			   size_t count)
 {
