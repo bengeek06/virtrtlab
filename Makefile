@@ -286,7 +286,7 @@ qa-daemon:
 	    daemon/instance.c \
 	    -- -Wall -Wextra -std=gnu11 -I daemon/
 
-## qa-kernel-lint: checkpatch + clang-format on kernel sources (no headers required)
+## qa-kernel-lint: checkpatch on kernel C sources and headers
 checkpatch.pl:
 	curl -sSfL $(CHECKPATCH_URL) -o $@
 	chmod +x $@
