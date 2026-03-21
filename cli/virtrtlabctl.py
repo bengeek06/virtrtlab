@@ -263,18 +263,59 @@ def _find_virtrtlabd_pid() -> int | None:
 
     Used to find the actual daemon PID after launch via sudo, where
     Popen.pid is the sudo wrapper PID rather than virtrtlabd's own PID.
+
+    When multiple virtrtlabd instances are running, prefer the one whose
+    command line matches the current RUN_DIR. If no such match exists and
+    exactly one virtrtlabd process is found, return that PID. If multiple
+    candidates exist with no RUN_DIR match, return None to avoid picking
+    an arbitrary instance.
     """
+    # Prefer a process whose cmdline contains --run-dir <RUN_DIR> or
+    # --run-dir=RUN_DIR, fall back to a unique virtrtlabd instance.
+    fallback_pid: int | None = None
+    virtrtlabd_count = 0
     try:
         for entry in Path("/proc").iterdir():
             if not entry.name.isdigit():
                 continue
             try:
-                if (entry / "comm").read_text().strip() == "virtrtlabd":
-                    return int(entry.name)
+                if (entry / "comm").read_text().strip() != "virtrtlabd":
+                    continue
+                pid = int(entry.name)
+                virtrtlabd_count += 1
+                cmdline_path = entry / "cmdline"
+                try:
+                    raw = cmdline_path.read_text()
+                except OSError:
+                    # If cmdline is unreadable, we cannot match RUN_DIR;
+                    # remember this PID only as a potential fallback.
+                    if fallback_pid is None:
+                        fallback_pid = pid
+                    continue
+                args = [arg for arg in raw.split("\0") if arg]
+                # Match either "--run-dir=<RUN_DIR>" or "--run-dir", RUN_DIR.
+                run_dir_match = False
+                run_dir_eq = f"--run-dir={RUN_DIR}"
+                if run_dir_eq in args:
+                    run_dir_match = True
+                else:
+                    for i, arg in enumerate(args):
+                        if arg == "--run-dir" and i + 1 < len(args):
+                            if args[i + 1] == RUN_DIR:
+                                run_dir_match = True
+                                break
+                if run_dir_match:
+                    return pid
+                if fallback_pid is None:
+                    fallback_pid = pid
             except OSError:
                 continue
     except OSError:
         pass
+    # If we saw exactly one virtrtlabd process, return it even if we
+    # could not match RUN_DIR, preserving the original behaviour.
+    if virtrtlabd_count == 1:
+        return fallback_pid
     return None
 
 
