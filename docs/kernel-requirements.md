@@ -1,66 +1,92 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+
 # Kernel Requirements
 
 VirtRTLab modules are out-of-tree and compile against standard kernel headers.
-Most features work on any kernel ≥ 5.15 with a stock distro config.
+The full list of required `CONFIG_` options is below.
 
-One subsystem requires a non-default kernel option: **GPIO emulation**.
+## Standard options (present in all Debian/Ubuntu kernels)
 
-## GPIO emulation — CONFIG_GPIO_SIM
+These are `tristate` or `bool` options already enabled in every stock
+Debian/Ubuntu kernel ≥ 5.15. No kernel recompilation is needed for these.
 
-The VirtRTLab daemon loads `gpio-sim` at runtime to create virtual GPIO chips
-that the AUT (Application Under Test) sees as real hardware via the GPIO
-character device API.
-
-`gpio-sim` depends on a chain of `bool` and `tristate` options that most distro
-kernels do **not** enable:
-
-| Option | Type | Role |
+| Option | Type | Required by |
 |---|---|---|
-| `CONFIG_GPIO_SIM` | tristate | gpio-sim driver itself |
-| `CONFIG_DEV_SYNC_PROBE` | tristate | synchronised probe helper |
-| `CONFIG_CONFIGFS_FS` | tristate | configfs filesystem |
-| `CONFIG_IRQ_SIM` | **bool** | virtual IRQ domain (built-in) |
+| `CONFIG_TTY` | bool | `virtrtlab_uart` TTY driver |
+| `CONFIG_GPIOLIB` | bool | `virtrtlab_gpio` gpio_chip registration |
+| `CONFIG_GPIO_CDEV` | bool | `/dev/gpiochipN` character device API |
+| `CONFIG_GPIO_SYSFS` | bool | legacy `/sys/class/gpio` ABI (optional; absent → `sysfs_base` attr not exposed) |
 
-Because `CONFIG_IRQ_SIM` is `bool`, it must be compiled into vmlinux — a kernel
-recompile and reboot are required on machines whose running kernel lacks it.
-
-### Checking your kernel
+Quick check:
 
 ```bash
-# Fast check — any of these indicates gpio-sim is ready
-modinfo gpio-sim
-grep "CONFIG_GPIO_SIM=m" /boot/config-$(uname -r)
-grep "devm_irq_domain_create_sim_full" /proc/kallsyms
+grep -E "CONFIG_TTY|CONFIG_GPIOLIB|CONFIG_GPIO_CDEV" /boot/config-$(uname -r)
 ```
 
-### Enabling on a vanilla source tree
+All must be `=y`.
+
+## CONFIG_IRQ_SIM — planned for v0.2.0 (GPIO edge events)
+
+> **Status (v0.1.0)**: `virtrtlab_gpio` does not yet implement the irqchip /
+> `irq_sim` integration. GPIO edge-event notifications to the AUT via the
+> GPIO v2 character device API are **planned for v0.2.0**. The current driver
+> only exposes the `inject` sysfs attribute for harness-driven line transitions.
+> `CONFIG_IRQ_SIM` is **not required** to build or run `virtrtlab_gpio` today.
+
+When the irqchip path is implemented, `virtrtlab_gpio` will use the **simulated
+IRQ domain** infrastructure (`irq_sim`) to back edge-event notifications. This
+infrastructure is guarded by:
+
+```
+CONFIG_IRQ_SIM   (bool)
+```
+
+Because it is a `bool` (not `tristate`), it **cannot be built as a module**: it
+must be compiled into `vmlinux`. If the running kernel lacks it, a kernel rebuild
+and reboot will be required before `virtrtlab_gpio` can deliver edge events to the
+AUT.
+
+### Checking your kernel (for future use)
 
 ```bash
-cd /path/to/linux-$(uname -r)
-scripts/config --module CONFIG_GPIO_SIM     # selects DEV_SYNC_PROBE, CONFIGFS_FS
-scripts/config --enable CONFIG_IRQ_SIM      # bool — forced =y anyway by select
-make olddefconfig
-
-# Rebuild kernel + modules + .deb packages
-make -j$(nproc) bindeb-pkg
-sudo dpkg -i ../linux-image-*.deb ../linux-modules-*.deb
-sudo reboot
+grep CONFIG_IRQ_SIM /boot/config-$(uname -r)
+# Expected: CONFIG_IRQ_SIM=y
+# Bad:      # CONFIG_IRQ_SIM is not set
 ```
 
-After reboot:
+### Impact (v0.2.0 and later)
 
-```bash
-sudo modprobe gpio-sim   # loads configfs + dev-sync-probe automatically
-```
-
-### Impact on VirtRTLab features
-
-| Feature | Without gpio-sim | With gpio-sim |
+| Feature | Without `CONFIG_IRQ_SIM` | With `CONFIG_IRQ_SIM=y` |
 |---|---|---|
 | UART emulation | ✅ full | ✅ full |
-| CAN emulation (v0.2) | ✅ full | ✅ full |
-| GPIO emulation | ❌ disabled | ✅ full |
-| GPIO AUT tests | ❌ skipped | ✅ run |
+| GPIO line state injection | ✅ full | ✅ full |
+| GPIO edge events to AUT | ❌ not available (v0.2.0+) | ✅ full (v0.2.0+) |
+| GPIO AUT tests (edge-based) | ❌ skipped by pytest | ✅ run |
 
-GPIO emulation is an **optional feature** — `virtrtlab_core` and `virtrtlab_uart`
-load and operate normally without it.
+GPIO **state injection** (`virtrtlabctl inject`) and UART emulation work without
+`CONFIG_IRQ_SIM`. Only AUTs that listen for GPIO edge events via
+`GPIO_V2_LINE_EVENT_*` will be affected (once that feature is implemented).
+
+### Enabling CONFIG_IRQ_SIM — Debian/Ubuntu procedure
+
+See [../README.md#recompiling-the-kernel](../README.md#recompiling-the-kernel-on-debianubuntu-advanced)
+for the full step-by-step. The only option to add is:
+
+```bash
+scripts/config --enable CONFIG_IRQ_SIM
+make olddefconfig
+```
+
+`CONFIG_IRQ_SIM` has no sub-dependencies. It does not pull in `gpio-sim`,
+`configfs`, or any other subsystem.
+
+## What VirtRTLab does NOT use
+
+The following kernel features are **not** required and were considered but
+rejected in the current architecture:
+
+| Rejected option | Reason |
+|---|---|
+| `CONFIG_GPIO_SIM` | VirtRTLab registers its own `gpio_chip` directly via `gpiochip_add_data()` — no dependency on the in-tree `gpio-sim` driver |
+| `CONFIG_CONFIGFS_FS` | configfs is the runtime configuration interface for `gpio-sim`; not used by `virtrtlab_gpio` |
+| `CONFIG_DEV_SYNC_PROBE` | synchronised probe helper required by `gpio-sim`; not needed by `virtrtlab_gpio` |
