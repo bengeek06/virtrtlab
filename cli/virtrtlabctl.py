@@ -6,6 +6,7 @@
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -18,11 +19,16 @@ from pathlib import Path
 
 SYSFS_ROOT = "/sys/kernel/virtrtlab"
 RUN_DIR = "/run/virtrtlab"
-# Resolved at import time: $VIRTRTLABD env var → repo-relative daemon/virtrtlabd → PATH
+# Resolved at import time:
+#   1. $VIRTRTLABD env var (explicit override)
+#   2. repo-relative daemon/virtrtlabd (development layout)
+#   3. virtrtlabd on PATH (installed layout)
 _SCRIPT_DIR = Path(__file__).resolve().parent
-DAEMON_BIN = os.environ.get(
+_DAEMON_RELATIVE = _SCRIPT_DIR.parent / "daemon" / "virtrtlabd"
+DAEMON_BIN: str = os.environ.get(
     "VIRTRTLABD",
-    str(_SCRIPT_DIR.parent / "daemon" / "virtrtlabd"),
+    str(_DAEMON_RELATIVE) if _DAEMON_RELATIVE.exists()
+    else (shutil.which("virtrtlabd") or "virtrtlabd"),
 )
 KNOWN_MODULES = ["virtrtlab_core", "virtrtlab_uart", "virtrtlab_gpio"]
 
@@ -101,8 +107,9 @@ def _find_ko(module_name: str, module_dir: str | None = None) -> Path:
     Search order:
       1. module_dir (if given)
       2. ./
-      3. modinfo -n <module_name>  (handles make modules_install subdirs)
-      4. /lib/modules/$(uname -r)/<module_name>.ko  (flat fallback)
+      3. modinfo -n <module_name>  (handles make modules_install subdirs;
+         tries modinfo, /sbin/modinfo, /usr/sbin/modinfo)
+      4. find /lib/modules/<uname -r>/ -name <filename>  (recursive scan)
     """
     filename = f"{module_name}.ko"
     candidates: list[Path] = []
@@ -113,26 +120,28 @@ def _find_ko(module_name: str, module_dir: str | None = None) -> Path:
         if path.exists():
             return path
 
-    # Try modinfo which knows the actual installed path (subdirs included)
-    try:
-        result = subprocess.run(
-            ["modinfo", "-n", module_name],
-            capture_output=True, text=True, check=True,
-        )
-        p = Path(result.stdout.strip())
-        if p.exists():
-            return p
-    except (subprocess.SubprocessError, OSError):
-        pass
+    # Try modinfo (may live in /sbin on some distros, not in user PATH)
+    for modinfo_bin in ("modinfo", "/sbin/modinfo", "/usr/sbin/modinfo"):
+        try:
+            result = subprocess.run(
+                [modinfo_bin, "-n", module_name],
+                capture_output=True, text=True, check=True,
+            )
+            p = Path(result.stdout.strip())
+            if p.exists():
+                return p
+            break  # modinfo ran but returned a non-existent path; don't retry
+        except (subprocess.SubprocessError, OSError, FileNotFoundError):
+            continue
 
-    # Flat fallback for /lib/modules/<uname -r>/
+    # Recursive scan of /lib/modules/<uname -r>/ (handles extra/ subdirs)
     try:
         uname_r = subprocess.check_output(["uname", "-r"], text=True).strip()
-        flat = Path(f"/lib/modules/{uname_r}") / filename
-        candidates.append(flat)
-        if flat.exists():
-            return flat
-    except subprocess.SubprocessError:
+        mod_root = Path(f"/lib/modules/{uname_r}")
+        for p in mod_root.rglob(filename):
+            return p
+        candidates.append(mod_root / filename)  # for the error message
+    except (subprocess.SubprocessError, OSError):
         pass
 
     searched = ", ".join(str(p) for p in candidates)
@@ -258,14 +267,20 @@ def _daemon_pid(run_dir: str = RUN_DIR) -> int | None:
         return None
     proc_dir = Path(f"/proc/{pid}")
     if not proc_dir.exists():
-        pid_file.unlink(missing_ok=True)
+        try:
+            pid_file.unlink(missing_ok=True)
+        except PermissionError:
+            pass  # root-owned pid file; stale but cannot remove
         return None
     # Validate the process is actually virtrtlabd (guard against PID reuse)
     comm_path = proc_dir / "comm"
     try:
         comm = comm_path.read_text().strip()
         if comm != "virtrtlabd":
-            pid_file.unlink(missing_ok=True)
+            try:
+                pid_file.unlink(missing_ok=True)
+            except PermissionError:
+                pass  # root-owned pid file; stale but cannot remove
             return None
     except OSError:
         pass  # /proc/<pid>/comm unreadable → assume still ours
@@ -343,6 +358,15 @@ def _poll_sockets(sock_paths: list[Path], timeout: float = 5.0) -> None:
                 f"timeout waiting for sockets: {missing}", exit_code=3
             )
         time.sleep(0.1)
+
+
+def _run_perm(cmd: list[str]) -> None:
+    """Run a permission-adjustment command; warn on failure instead of silently discarding."""
+    r = subprocess.run(cmd, capture_output=True)
+    if r.returncode != 0:
+        msg = r.stderr.decode(errors="replace").strip()
+        print(f"warning: permission fix failed ({' '.join(cmd[-3:])}): {msg}",
+              file=sys.stderr)
 
 
 def _expected_sockets(profile: dict) -> list[Path]:
@@ -584,8 +608,33 @@ def cmd_up(args: argparse.Namespace) -> int:
 
     # Poll all expected sockets (up to 5 s)
     expected_socks = _expected_sockets(profile)
+    prefix = _sudo_prefix(no_sudo)
     if expected_socks:
         _poll_sockets(expected_socks)
+        # Fix socket ownership/permissions so users in the virtrtlab group
+        # can connect without running as root (srwxr-xr-x → srwx-rw---).
+        for sock in expected_socks:
+            _run_perm(prefix + ["chown", "root:virtrtlab", str(sock)])
+            _run_perm(prefix + ["chmod", "660", str(sock)])
+
+    # Fix GPIO inject sysfs attribute permissions so that users in the
+    # virtrtlab group can write them without running as root (--w------- → --w--w----).
+    devices_dir = Path(SYSFS_ROOT) / "devices"
+    if devices_dir.is_dir():
+        for inject_file in sorted(devices_dir.glob("*/inject")):
+            _run_perm(prefix + ["chown", "root:virtrtlab", str(inject_file)])
+            _run_perm(prefix + ["chmod", "220", str(inject_file)])
+
+        # Fix /dev/gpiochipN character device permissions so virtrtlab group
+        # can open the device and issue GPIO v2 ioctls (crw------- → crw-rw----).
+        for chip_path_file in sorted(devices_dir.glob("*/chip_path")):
+            try:
+                chip_path = chip_path_file.read_text().strip()
+            except OSError:
+                chip_path = ""
+            if chip_path:
+                _run_perm(prefix + ["chown", "root:virtrtlab", chip_path])
+                _run_perm(prefix + ["chmod", "660", chip_path])
 
     # Resolve and emit the AUT integration contract
     contract = _resolve_aut_contract(profile)

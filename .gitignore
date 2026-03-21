@@ -12,6 +12,11 @@ modules.builtin
 modules.builtin.modinfo
 Module.symvers
 
+# Examples — compiled AUT binaries
+examples/aut_uart_timeout/aut
+examples/aut_uart_statemachine/aut
+examples/aut_gpio_polarity/aut
+
 # Daemon
 daemon/virtrtlabd
 
