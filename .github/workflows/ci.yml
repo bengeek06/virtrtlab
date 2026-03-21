@@ -19,6 +19,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 # Pinned kernel version used consistently across all kernel jobs.
 # Update KVER and KPKG together when bumping the base kernel.
 env:
@@ -235,7 +238,7 @@ jobs:
             --cov=cli \
             --cov-fail-under=49 \
             --junitxml=test-artifacts/junit-cli.xml \
-            | tee test-artifacts/pytest-cli.log
+            2>&1 | tee test-artifacts/pytest-cli.log
 
       - name: Upload CLI test reports
         if: always()
@@ -269,7 +272,7 @@ jobs:
           set -o pipefail
           pytest tests/install/ \
             --junitxml=test-artifacts/junit-install.xml \
-            | tee test-artifacts/pytest-install.log
+            2>&1 | tee test-artifacts/pytest-install.log
 
       - name: Upload install test reports
         if: always()
