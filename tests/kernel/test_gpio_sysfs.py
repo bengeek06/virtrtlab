@@ -398,18 +398,30 @@ class TestGpioSysfsBase:
         val = int(r(attr_path))
         assert val >= 0, f"sysfs_base must be >= 0, got {val}"
 
-    def test_sysfs_base_maps_to_legacy_paths(self, gpio_module):
-        """Line 0..7 must appear at /sys/class/gpio/gpio<sysfs_base+L>/."""
+    def test_sysfs_base_maps_to_gpiochip_dir(self, gpio_module):
+        """The gpiochip<base> directory must exist and its 'base' attr must match.
+
+        Individual gpio<N>/ dirs only exist after an explicit export; what is
+        created automatically at chip registration is /sys/class/gpio/gpiochip<base>/
+        with a readable 'base' attribute that must equal sysfs_base.
+        """
         attr_path = g(0, "sysfs_base")
         if not os.path.exists(attr_path):
             pytest.skip("sysfs_base absent: legacy GPIO ABI not available")
         base = int(r(attr_path))
-        for line in range(8):
-            legacy_path = os.path.join(self.LEGACY_GPIO_ROOT, f"gpio{base + line}")
-            assert os.path.isdir(legacy_path), (
-                f"Expected legacy path {legacy_path} to exist "
-                f"(sysfs_base={base}, line={line})"
-            )
+        chip_dir = os.path.join(self.LEGACY_GPIO_ROOT, f"gpiochip{base}")
+        assert os.path.isdir(chip_dir), (
+            f"Expected gpiochip directory {chip_dir} to exist "
+            f"(sysfs_base={base})"
+        )
+        chip_base_file = os.path.join(chip_dir, "base")
+        assert os.path.exists(chip_base_file), (
+            f"{chip_dir}/base not found"
+        )
+        chip_base = int(open(chip_base_file).read().strip())
+        assert chip_base == base, (
+            f"gpiochip{base}/base={chip_base} does not match sysfs_base={base}"
+        )
 
     def test_sysfs_base_is_stable_after_reload(self, gpio_module):
         """sysfs_base does not change between two reads (no PRNG draw)."""
