@@ -66,12 +66,14 @@ if [[ ! -S "$SOCK" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Launch AUT in background.
+# AUT runs in the background so the simulator (foreground heredoc) can read
+# the READY byte after the AUT has already opened the TTY.
+# Same rule as uart_timeout: never use "|| true" after "wait $AUT_PID".
 # ---------------------------------------------------------------------------
 timeout "$AUT_TIMEOUT" "$AUT" &
 AUT_PID=$!
 
-# Give the AUT time to open the tty and send its READY byte.
+# Give the AUT time to open the tty and send its READY byte (0x55).
 sleep 0.3
 
 # ---------------------------------------------------------------------------
@@ -81,7 +83,7 @@ sleep 0.3
 #   Fault:    [0x01, 0x42, 0xFF, 0x43]        — 0xFF injected as retransmit;
 #             AUT consumes 0xFF as checksum → mismatch → exits 2.
 # ---------------------------------------------------------------------------
-FAULT="$FAULT_MODE" python3 - "$SOCK" <<'EOF'
+FAULT="$FAULT_MODE" python3 - "$SOCK" <<'PYEOF'
 import os, socket, sys, time
 
 sock_path = sys.argv[1]
@@ -93,7 +95,7 @@ CHECKSUM = SOF ^ DATA   # = 0x43
 INJECT   = 0xFF         # extra byte simulating a retransmit
 
 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-    s.settimeout(3.0)
+    s.settimeout(5.0)
     try:
         s.connect(sock_path)
     except OSError as e:
@@ -118,14 +120,12 @@ with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
         frame = bytes([SOF, DATA, CHECKSUM])
 
     s.sendall(frame)
-    time.sleep(1.0)
-EOF
+    time.sleep(3.0)
+PYEOF
 
-# ---------------------------------------------------------------------------
-# Collect the AUT exit code and assert the expected outcome.
-# ---------------------------------------------------------------------------
-wait "$AUT_PID" 2>/dev/null || true
-AUT_RC=$?
+# Collect the AUT exit code (same set -e-safe pattern as uart_timeout).
+AUT_RC=0
+wait "$AUT_PID" || AUT_RC=$?
 
 if $FAULT_MODE; then
     # AUT must exit non-zero (2 = BAD STATE) because of the injected byte.

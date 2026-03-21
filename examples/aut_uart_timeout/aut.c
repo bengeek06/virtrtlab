@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * aut_uart_timeout.c — UART reader with a missing read() timeout.
+ * aut_uart_timeout.c — UART reader with a missing per-byte timeout.
  *
- * Bug: termios is configured with VMIN=4, VTIME=0.  The read() call blocks
- * forever if fewer than 4 bytes arrive.  A correct implementation would set
- * VTIME to a finite value, or use poll()/select() with a timeout before
- * calling read().
+ * Bug: the AUT reads MSG_LEN bytes one at a time in a blocking loop with
+ * VMIN=1, VTIME=0 (block until at least 1 byte is available, no character
+ * timer).  If one byte of the frame never arrives the AUT hangs forever
+ * inside read(), with no way to detect or recover from the loss.
+ *
+ * A correct implementation would call poll()/select() with a reasonable
+ * inter-byte timeout (e.g. 500 ms) before each read(), or set VTIME to a
+ * non-zero value to engage the inactivity timer.
  *
  * Under normal operation the companion harness (acting as the simulator)
- * sends exactly 4 bytes, so the bug is invisible.  When the harness drops
- * the last byte the AUT hangs forever and must be killed by an external
- * watchdog.
+ * sends all MSG_LEN bytes, so the bug is invisible.  When the harness drops
+ * the last byte the AUT blocks forever on the final read() and must be
+ * killed by an external watchdog.
  *
  * Part of VirtRTLab — fault-injection example suite.
  */
@@ -53,11 +57,15 @@ cfsetispeed(&tio, B9600);
 cfsetospeed(&tio, B9600);
 
 /*
- * BUG: VMIN=MSG_LEN forces read() to block until exactly MSG_LEN
- * bytes arrive.  VTIME=0 disables the inter-character timer, so no
- * timeout will ever fire — the process hangs if one byte is missing.
+ * VMIN=1: return as soon as 1 byte is available.
+ * VTIME=0: no inactivity timer — read() blocks indefinitely if no
+ *           byte arrives.
+ *
+ * BUG: there is no inter-byte timeout.  A correct implementation would
+ * use poll()/select() before each read(), or set VTIME > 0 to let the
+ * kernel deliver a timeout after a short idle period.
  */
-tio.c_cc[VMIN]  = MSG_LEN;
+tio.c_cc[VMIN]  = 1;
 tio.c_cc[VTIME] = 0;
 
 if (tcsetattr(fd, TCSANOW, &tio) < 0) {
@@ -76,16 +84,27 @@ return 1;
 }
 
 /*
- * Blocking read — hangs if fewer than MSG_LEN bytes arrive because
- * VTIME=0 disables any inter-character timeout.
+ * Read MSG_LEN bytes one at a time.
+ *
+ * BUG: each read() blocks indefinitely (VTIME=0).  If the last byte
+ * never arrives (e.g. dropped by the simulator), the AUT hangs here
+ * with no timeout and no indication that something went wrong.
  */
 unsigned char buf[MSG_LEN];
-ssize_t n = read(fd, buf, MSG_LEN);
+
+for (int i = 0; i < MSG_LEN; i++) {
+ssize_t n = read(fd, &buf[i], 1);
 
 if (n < 0) {
-fprintf(stderr, "read: %s\n", strerror(errno));
+fprintf(stderr, "read byte %d: %s\n", i, strerror(errno));
 close(fd);
 return 1;
+}
+if (n == 0) {
+fprintf(stderr, "read byte %d: EOF\n", i);
+close(fd);
+return 1;
+}
 }
 
 /* Validate: buf[3] must equal buf[0]^buf[1]^buf[2]. */
@@ -98,7 +117,7 @@ close(fd);
 return 2;
 }
 
-printf("OK received %zd bytes, checksum 0x%02x\n", n, cksum);
+printf("OK received %d bytes, checksum 0x%02x\n", MSG_LEN, cksum);
 close(fd);
 return 0;
 }

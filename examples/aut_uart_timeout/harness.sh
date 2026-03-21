@@ -68,7 +68,13 @@ if [[ ! -S "$SOCK" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Launch the AUT under a hard timeout so it cannot hang the harness.
+# AUT runs in the background so the simulator can run synchronously
+# (foreground heredoc).  This ensures the AUT has time to open the TTY
+# before the simulator connects — necessary because the virtual UART driver
+# raises HUP on wire_fd when no AUT process holds the device open.
+#
+# KEY: do NOT use "|| true" after "wait $AUT_PID" — that would discard the
+# 124 exit code that timeout(1) returns when it kills the child.
 # ---------------------------------------------------------------------------
 timeout "$AUT_TIMEOUT" "$AUT" &
 AUT_PID=$!
@@ -79,15 +85,18 @@ sleep 0.3
 # ---------------------------------------------------------------------------
 # Act as the simulator: connect to the daemon socket, read the READY byte,
 # then send the packet (full or truncated depending on the mode).
+# In fault mode we sleep AUT_TIMEOUT+2 to keep the connection open until
+# timeout(1) kills the AUT; only then do we exit and free the socket.
 # ---------------------------------------------------------------------------
-FAULT="$FAULT_MODE" python3 - "$SOCK" <<'EOF'
+FAULT="$FAULT_MODE" AUT_TIMEOUT="$AUT_TIMEOUT" python3 - "$SOCK" <<'PYEOF'
 import os, socket, sys, time
 
 sock_path = sys.argv[1]
 fault     = os.environ.get("FAULT", "false").lower() == "true"
+timeout_s = float(os.environ.get("AUT_TIMEOUT", "4"))
 
 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-    s.settimeout(3.0)
+    s.settimeout(timeout_s)
     try:
         s.connect(sock_path)
     except OSError as e:
@@ -113,18 +122,21 @@ with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
     if fault:
         # Send only 3 bytes — the AUT will block waiting for the 4th.
         s.sendall(packet[:3])
-        # Hold the connection open so the AUT stays in read().
-        time.sleep(float(os.environ.get("AUT_TIMEOUT", "4")) + 1)
+        # Hold the connection open until timeout(1) kills the AUT.
+        time.sleep(timeout_s + 2)
     else:
         s.sendall(packet)
-        time.sleep(1.0)
-EOF
+        time.sleep(2.0)
+PYEOF
 
 # ---------------------------------------------------------------------------
-# Collect the AUT exit code and assert the expected outcome.
+# Collect the AUT exit code.
+# With "set -e", a bare "wait PID" returning 124 would abort the script
+# before we can inspect $?.  The "|| AUT_RC=$?" pattern captures the non-zero
+# exit status from the left side without tripping set -e.
 # ---------------------------------------------------------------------------
-wait "$AUT_PID" 2>/dev/null || true
-AUT_RC=$?
+AUT_RC=0
+wait "$AUT_PID" || AUT_RC=$?
 
 if $FAULT_MODE; then
     # timeout(1) exits 124 when it kills the child; any non-zero is fine.

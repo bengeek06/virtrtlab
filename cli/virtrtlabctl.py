@@ -107,8 +107,9 @@ def _find_ko(module_name: str, module_dir: str | None = None) -> Path:
     Search order:
       1. module_dir (if given)
       2. ./
-      3. modinfo -n <module_name>  (handles make modules_install subdirs)
-      4. /lib/modules/$(uname -r)/<module_name>.ko  (flat fallback)
+      3. modinfo -n <module_name>  (handles make modules_install subdirs;
+         tries modinfo, /sbin/modinfo, /usr/sbin/modinfo)
+      4. find /lib/modules/<uname -r>/ -name <filename>  (recursive scan)
     """
     filename = f"{module_name}.ko"
     candidates: list[Path] = []
@@ -119,26 +120,28 @@ def _find_ko(module_name: str, module_dir: str | None = None) -> Path:
         if path.exists():
             return path
 
-    # Try modinfo which knows the actual installed path (subdirs included)
-    try:
-        result = subprocess.run(
-            ["modinfo", "-n", module_name],
-            capture_output=True, text=True, check=True,
-        )
-        p = Path(result.stdout.strip())
-        if p.exists():
-            return p
-    except (subprocess.SubprocessError, OSError):
-        pass
+    # Try modinfo (may live in /sbin on some distros, not in user PATH)
+    for modinfo_bin in ("modinfo", "/sbin/modinfo", "/usr/sbin/modinfo"):
+        try:
+            result = subprocess.run(
+                [modinfo_bin, "-n", module_name],
+                capture_output=True, text=True, check=True,
+            )
+            p = Path(result.stdout.strip())
+            if p.exists():
+                return p
+            break  # modinfo ran but returned a non-existent path; don't retry
+        except (subprocess.SubprocessError, OSError, FileNotFoundError):
+            continue
 
-    # Flat fallback for /lib/modules/<uname -r>/
+    # Recursive scan of /lib/modules/<uname -r>/ (handles extra/ subdirs)
     try:
         uname_r = subprocess.check_output(["uname", "-r"], text=True).strip()
-        flat = Path(f"/lib/modules/{uname_r}") / filename
-        candidates.append(flat)
-        if flat.exists():
-            return flat
-    except subprocess.SubprocessError:
+        mod_root = Path(f"/lib/modules/{uname_r}")
+        for p in mod_root.rglob(filename):
+            return p
+        candidates.append(mod_root / filename)  # for the error message
+    except (subprocess.SubprocessError, OSError):
         pass
 
     searched = ", ".join(str(p) for p in candidates)
@@ -596,8 +599,51 @@ def cmd_up(args: argparse.Namespace) -> int:
 
     # Poll all expected sockets (up to 5 s)
     expected_socks = _expected_sockets(profile)
+    prefix = _sudo_prefix(no_sudo)
     if expected_socks:
         _poll_sockets(expected_socks)
+        # Fix socket ownership/permissions so users in the virtrtlab group
+        # can connect without running as root (srwxr-xr-x → srwx-rw---).
+        for sock in expected_socks:
+            subprocess.run(
+                prefix + ["chown", "root:virtrtlab", str(sock)],
+                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                prefix + ["chmod", "660", str(sock)],
+                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+
+    # Fix GPIO inject sysfs attribute permissions so that users in the
+    # virtrtlab group can write them without running as root (--w------- → --w--w----).
+    devices_dir = Path(SYSFS_ROOT) / "devices"
+    if devices_dir.is_dir():
+        for inject_file in sorted(devices_dir.glob("*/inject")):
+            subprocess.run(
+                prefix + ["chown", "root:virtrtlab", str(inject_file)],
+                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                prefix + ["chmod", "220", str(inject_file)],
+                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+
+        # Fix /dev/gpiochipN character device permissions so virtrtlab group
+        # can open the device and issue GPIO v2 ioctls (crw------- → crw-rw----).
+        for chip_path_file in sorted(devices_dir.glob("*/chip_path")):
+            try:
+                chip_path = chip_path_file.read_text().strip()
+            except OSError:
+                chip_path = ""
+            if chip_path:
+                subprocess.run(
+                    prefix + ["chown", "root:virtrtlab", chip_path],
+                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                subprocess.run(
+                    prefix + ["chmod", "660", chip_path],
+                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
 
     # Resolve and emit the AUT integration contract
     contract = _resolve_aut_contract(profile)
