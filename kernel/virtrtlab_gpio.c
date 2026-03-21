@@ -647,8 +647,14 @@ static ssize_t sysfs_base_show(struct device *dev, struct device_attribute *attr
 {
 	struct virtrtlab_gpio_dev *gdev = to_gpio_dev(dev);
 
+	/*
+	 * gc.base < 0 is unreachable in practice: gpiolib always assigns a
+	 * non-negative base on successful gpiochip_add_data().  Guard kept
+	 * for defence in depth; return -ENODATA ("no data available") rather
+	 * than -EPERM which incorrectly implies a permission problem.
+	 */
 	if (gdev->gc.base < 0)
-		return -EPERM;
+		return -ENODATA;
 	return sysfs_emit(buf, "%u\n", (u32)gdev->gc.base);
 }
 static DEVICE_ATTR_RO(sysfs_base);

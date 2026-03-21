@@ -418,7 +418,7 @@ class TestGpioSysfsBase:
         assert os.path.exists(chip_base_file), (
             f"{chip_dir}/base not found"
         )
-        chip_base = int(open(chip_base_file).read().strip())
+        chip_base = int(r(chip_base_file))
         assert chip_base == base, (
             f"gpiochip{base}/base={chip_base} does not match sysfs_base={base}"
         )

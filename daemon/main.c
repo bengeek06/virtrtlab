@@ -225,8 +225,10 @@ int main(int argc, char *argv[])
 			/* Destroy already-initialised instances in reverse order. */
 			while (--i >= 0)
 				uart_instance_destroy(&instances[i], epoll_fd);
-			close(sig_fd);
-			close(epoll_fd);
+			if (close(sig_fd) < 0)
+				syslog(LOG_WARNING, "failed to close signalfd: %m");
+			if (close(epoll_fd) < 0)
+				syslog(LOG_WARNING, "failed to close epoll fd: %m");
 			closelog();
 			return EXIT_FAILURE;
 		}

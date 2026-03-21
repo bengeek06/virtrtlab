@@ -469,20 +469,41 @@ def _resolve_aut_contract(profile: dict, run_dir: str = RUN_DIR) -> list[dict]:
 
 
 def _print_contract_human(contract: list[dict]) -> None:
-    """Print the AUT integration contract in the spec-mandated human format."""
+    """Print the AUT integration contract in the spec-mandated human format.
+
+    Env var emission order matches device-contract.md exactly:
+      UART  : VIRTRTLAB_UART<N>
+      GPIO  : VIRTRTLAB_GPIOCHIP<N>, VIRTRTLAB_GPIOBASE<N> (if present), VIRTRTLAB_GPIOCTRL<N>
+    """
     for entry in contract:
         name = entry["name"]
         etype = entry["type"]
+        idx = name[len(etype):]          # e.g. "0" from "uart0" or "gpio0"
+        env = entry.get("env", {})
         print(f"[ok] {name} loaded")
         if etype == "uart":
             print(f"     tty: {entry['aut_path']}")
+            ordered_keys = [f"VIRTRTLAB_UART{idx}"]
         elif etype == "gpio":
             print(f"     gpiochip: {entry['chip_path']}")
             if "sysfs_base" in entry:
                 print(f"     sysfs base: {entry['sysfs_base']}")
             print(f"     control: {entry['control_path']}")
-        for var, val in entry["env"].items():
-            print(f"     export {var}={val}")
+            ordered_keys = [
+                f"VIRTRTLAB_GPIOCHIP{idx}",
+                f"VIRTRTLAB_GPIOBASE{idx}",
+                f"VIRTRTLAB_GPIOCTRL{idx}",
+            ]
+        else:
+            ordered_keys = []
+        # Emit known keys in canonical order, then any extra keys sorted.
+        emitted = set()
+        for key in ordered_keys:
+            if key in env:
+                print(f"     export {key}={env[key]}")
+                emitted.add(key)
+        for key in sorted(k for k in env if k not in emitted):
+            print(f"     export {key}={env[key]}")
         for warning in entry.get("warnings", []):
             print(f"     [warn] {warning}")
         print()
