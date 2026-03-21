@@ -13,6 +13,22 @@ VERSION="${RAW_VERSION#v}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+MAKEFILE_VERSION="$(sed -n 's/^VERSION  *:= *//p' "$REPO_ROOT/Makefile" | head -n 1)"
+DKMS_VERSION="$(sed -n 's/^PACKAGE_VERSION="\([^"]*\)"/\1/p' "$REPO_ROOT/dkms.conf" | head -n 1)"
+
+if [[ -z "$MAKEFILE_VERSION" || -z "$DKMS_VERSION" ]]; then
+  echo "[FAIL] unable to determine version from Makefile or dkms.conf"
+  exit 1
+fi
+
+if [[ "$VERSION" != "$MAKEFILE_VERSION" || "$VERSION" != "$DKMS_VERSION" ]]; then
+  echo "[FAIL] version mismatch detected"
+  echo "       requested package version: $VERSION"
+  echo "       Makefile VERSION:         $MAKEFILE_VERSION"
+  echo "       dkms.conf PACKAGE_VERSION:$DKMS_VERSION"
+  exit 1
+fi
+
 ARCH="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
 PKG_NAME="virtrtlab"
 PKG_FILE="${PKG_NAME}_${VERSION}_${ARCH}.deb"
@@ -55,7 +71,7 @@ Section: kernel
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: VirtRTLab <noreply@example.com>
-Depends: dkms (>= 2.8.0), kmod, udev, adduser, systemd | systemd-sysv
+Depends: dkms (>= 2.8.0), kmod, udev, adduser, systemd | systemd-sysv, python3 (>= 3.11)
 Description: VirtRTLab virtual peripherals (DKMS modules + daemon + CLI)
  VirtRTLab provides virtual UART/GPIO peripherals with fault injection,
  a relay daemon, and a userspace control CLI.
@@ -82,9 +98,25 @@ elif [ -x /sbin/dkms ]; then
 fi
 
 if [ -n "\$DKMS_BIN" ]; then
-  \$DKMS_BIN add -m virtrtlab -v ${VERSION} || true
-  \$DKMS_BIN build -m virtrtlab -v ${VERSION} || true
-  \$DKMS_BIN install -m virtrtlab -v ${VERSION} || true
+  if ! \$DKMS_BIN status -m virtrtlab -v ${VERSION} >/dev/null 2>&1; then
+    if ! \$DKMS_BIN add -m virtrtlab -v ${VERSION}; then
+      echo "[FAIL] dkms add failed for virtrtlab/${VERSION}" >&2
+      echo "       Check that /usr/src/virtrtlab-${VERSION} is present and valid." >&2
+      exit 1
+    fi
+  fi
+
+  if ! \$DKMS_BIN build -m virtrtlab -v ${VERSION}; then
+    echo "[FAIL] dkms build failed for virtrtlab/${VERSION}" >&2
+    echo "       Ensure kernel headers and build tools are installed for the running kernel." >&2
+    exit 1
+  fi
+
+  if ! \$DKMS_BIN install -m virtrtlab -v ${VERSION}; then
+    echo "[FAIL] dkms install failed for virtrtlab/${VERSION}" >&2
+    echo "       Check Secure Boot signing requirements and DKMS build logs." >&2
+    exit 1
+  fi
 fi
 
 depmod -a || true
@@ -109,7 +141,8 @@ cat > "$STAGE_DIR/DEBIAN/postrm" <<EOF
 #!/bin/sh
 set -e
 
-if [ "\$1" = "purge" ]; then
+case "\$1" in
+remove|purge)
   DKMS_BIN=""
   if command -v dkms >/dev/null 2>&1; then
     DKMS_BIN="\$(command -v dkms)"
@@ -122,7 +155,8 @@ if [ "\$1" = "purge" ]; then
   if [ -n "\$DKMS_BIN" ]; then
     \$DKMS_BIN remove -m virtrtlab -v ${VERSION} --all || true
   fi
-fi
+  ;;
+esac
 
 exit 0
 EOF
