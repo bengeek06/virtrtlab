@@ -95,21 +95,30 @@ kernel/virtrtlab_gpio.ko
 
 ### Kernel configuration requirements
 
-VirtRTLab modules are **out-of-tree** and require no kernel recompilation in most cases. The following `CONFIG_` options must be enabled (they are in all standard Debian/Ubuntu kernels):
+VirtRTLab modules are **out-of-tree** and require no kernel recompilation for
+most features. The following `CONFIG_` options are needed:
 
-| Config | Required by |
-|---|---|
-| `CONFIG_TTY` | virtrtlab_uart |
-| `CONFIG_GPIOLIB` | virtrtlab_gpio |
-| `CONFIG_GPIO_CDEV` | virtrtlab_gpio (chardev API) |
+| Config | Type | Required by | Present in stock Debian/Ubuntu |
+|---|---|---|---|
+| `CONFIG_TTY` | bool | virtrtlab_uart | ✅ yes |
+| `CONFIG_GPIOLIB` | bool | virtrtlab_gpio | ✅ yes |
+| `CONFIG_GPIO_CDEV` | bool | virtrtlab_gpio (chardev API) | ✅ yes |
+| `CONFIG_IRQ_SIM` | **bool** | virtrtlab_gpio (edge events) | ⚠️ **often missing** |
 
-To check your running kernel:
+`CONFIG_IRQ_SIM` is the exception: it is a `bool` option (cannot be a module)
+used by the gpiolib irqchip layer to back GPIO edge-event notifications.
+If it is absent from your running kernel, GPIO edge events to the AUT are
+not available and a kernel rebuild is required.
+
+To check your kernel:
 
 ```sh
-grep -E "CONFIG_TTY|CONFIG_GPIOLIB|CONFIG_GPIO_CDEV" /boot/config-$(uname -r)
+grep -E "CONFIG_TTY|CONFIG_GPIOLIB|CONFIG_GPIO_CDEV|CONFIG_IRQ_SIM" /boot/config-$(uname -r)
 ```
 
-All three should be `=y` or `=m`.
+All should be `=y`. If `CONFIG_IRQ_SIM` is missing, see the recompilation
+procedure below. See also [docs/kernel-requirements.md](docs/kernel-requirements.md)
+for the full option reference.
 
 #### Recompiling the kernel on Debian/Ubuntu (advanced)
 
@@ -145,8 +154,13 @@ make olddefconfig
 scripts/config --enable CONFIG_TTY
 scripts/config --enable CONFIG_GPIOLIB
 scripts/config --enable CONFIG_GPIO_CDEV
+scripts/config --enable CONFIG_IRQ_SIM
 make olddefconfig
 ```
+
+`CONFIG_IRQ_SIM` is the key option: it is a `bool` that must be built into
+`vmlinux` (not a loadable module). It enables the simulated IRQ domain used
+by the gpiolib irqchip layer for GPIO edge-event notifications.
 
 **5 — Build and install Debian packages**
 
