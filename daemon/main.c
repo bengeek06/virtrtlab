@@ -21,6 +21,7 @@
 
 #include <errno.h>
 #include <getopt.h>
+#include <grp.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -30,6 +31,7 @@
 #include <sys/epoll.h>
 #include <sys/signalfd.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include "epoll_loop.h"
@@ -171,6 +173,8 @@ int main(int argc, char *argv[])
 {
 	struct uart_instance instances[MAX_UARTS];
 	struct evt_ctx       ctx_signal;
+	struct group        *gr;
+	gid_t                sock_gid;
 	int                  num_uarts;
 	const char          *run_dir;
 	int                  epoll_fd;
@@ -188,6 +192,23 @@ int main(int argc, char *argv[])
 	 * EPIPE instead of killing the process.  Handlers check errno.
 	 */
 	signal(SIGPIPE, SIG_IGN);
+
+	/*
+	 * Resolve the virtrtlab group ID once at startup so each socket can
+	 * be fchown'd to root:virtrtlab after bind().
+	 * If the group does not exist, sockets are created root:root and the
+	 * daemon logs a warning — non-root connections will be refused until
+	 * the group is created and the daemon is restarted.
+	 */
+	gr = getgrnam("virtrtlab");
+	if (!gr) {
+		syslog(LOG_WARNING,
+		       "group 'virtrtlab' not found — "
+		       "sockets will be root:root 0660");
+		sock_gid = (gid_t)-1;
+	} else {
+		sock_gid = gr->gr_gid;
+	}
 
 	if (mkdir_rundir(run_dir) < 0) {
 		closelog();
@@ -217,7 +238,7 @@ int main(int argc, char *argv[])
 	 * and clean up already-initialised instances (AC5).
 	 */
 	for (i = 0; i < num_uarts; i++) {
-		if (uart_instance_init(&instances[i], i, epoll_fd, run_dir) < 0) {
+		if (uart_instance_init(&instances[i], i, epoll_fd, run_dir, sock_gid) < 0) {
 			syslog(LOG_ERR,
 				"failed to initialise uart%d — "
 				"is virtrtlab_uart loaded with num_uarts>=%d?",
