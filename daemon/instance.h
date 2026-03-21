@@ -16,6 +16,8 @@
 #ifndef VIRTRTLAB_INSTANCE_H
 #define VIRTRTLAB_INSTANCE_H
 
+#include <sys/types.h>  /* gid_t */
+
 #define WIRE_BUF_SIZE   4096
 #define SOCK_BUF_SIZE   4096
 #define SOCK_PATH_MAX    108  /* sizeof(struct sockaddr_un.sun_path) */
@@ -68,7 +70,7 @@ struct uart_instance {
  * Returns 0 on success, -1 on error (wire device missing → AC5 clean failure).
  */
 int  uart_instance_init(struct uart_instance *inst, int idx,
-			int epoll_fd, const char *run_dir);
+			int epoll_fd, const char *run_dir, gid_t gid);
 
 /*
  * uart_instance_destroy - unlink socket, close all fds, deregister from epoll.

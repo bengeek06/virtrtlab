@@ -30,6 +30,8 @@
 #include <syslog.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -87,9 +89,10 @@ static void enter_wait_client(struct uart_instance *inst, int epoll_fd)
 /* ---- public API ---------------------------------------------------------- */
 
 int uart_instance_init(struct uart_instance *inst, int idx,
-		       int epoll_fd, const char *run_dir)
+		       int epoll_fd, const char *run_dir, gid_t gid)
 {
 	struct sockaddr_un addr;
+	mode_t             old_mask;
 
 	inst->idx       = idx;
 	inst->client_fd = -1;
@@ -138,11 +141,28 @@ int uart_instance_init(struct uart_instance *inst, int idx,
 	}
 	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", inst->sock_path);
 
+	/*
+	 * Set a restrictive umask so bind() creates the socket as srw-rw----
+	 * (0660): root can accept, virtrtlab group can connect, others cannot.
+	 * Restore immediately after bind() to not affect subsequent callers.
+	 */
+	old_mask = umask(0117);
 	if (bind(inst->server_fd,
 		 (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		umask(old_mask);
 		syslog(LOG_ERR, "uart%d: bind %s: %m", inst->idx, inst->sock_path);
 		goto err_server;
 	}
+	umask(old_mask);
+
+	/*
+	 * Transfer group ownership to virtrtlab so group members can connect
+	 * without running as root.  The socket file was just created by bind(),
+	 * so chown() on the path is safe and necessary: fchown() on an AF_UNIX
+	 * socket fd does not affect the filesystem inode created by bind().
+	 */
+	if (gid != (gid_t)-1 && chown(inst->sock_path, 0, gid) < 0)
+		syslog(LOG_WARNING, "uart%d: chown socket: %m", inst->idx);
 
 	if (listen(inst->server_fd, 1) < 0) {
 		syslog(LOG_ERR, "uart%d: listen: %m", inst->idx);
