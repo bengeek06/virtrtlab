@@ -189,10 +189,12 @@ class TestFindKo:
         """
         monkeypatch.chdir(tmp_path)
         # Prevent modinfo from finding an installed module on the test machine.
+        # Match bare "modinfo", "/sbin/modinfo", "/usr/sbin/modinfo", etc.
+        import os as _os
         import subprocess as _sp
         original_run = _sp.run
         def _fake_run(cmd, **kwargs):
-            if cmd[0] == "modinfo":
+            if _os.path.basename(cmd[0]) == "modinfo":
                 raise _sp.SubprocessError("stubbed")
             return original_run(cmd, **kwargs)
         monkeypatch.setattr(_sp, "run", _fake_run)

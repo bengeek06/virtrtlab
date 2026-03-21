@@ -157,11 +157,12 @@ int uart_instance_init(struct uart_instance *inst, int idx,
 
 	/*
 	 * Transfer group ownership to virtrtlab so group members can connect
-	 * without running as root.  fchown() is safe: it operates on the fd,
-	 * avoiding any TOCTOU race with the pathname.
+	 * without running as root.  The socket file was just created by bind(),
+	 * so chown() on the path is safe and necessary: fchown() on an AF_UNIX
+	 * socket fd does not affect the filesystem inode created by bind().
 	 */
-	if (gid != (gid_t)-1 && fchown(inst->server_fd, 0, gid) < 0)
-		syslog(LOG_WARNING, "uart%d: fchown socket: %m", inst->idx);
+	if (gid != (gid_t)-1 && chown(inst->sock_path, 0, gid) < 0)
+		syslog(LOG_WARNING, "uart%d: chown socket: %m", inst->idx);
 
 	if (listen(inst->server_fd, 1) < 0) {
 		syslog(LOG_ERR, "uart%d: listen: %m", inst->idx);
