@@ -1,493 +1,477 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 
-# VirtRTLab — `virtrtlabctl` CLI (v1)
+# `virtrtlabctl` — CLI Reference
 
-Source of truth is the root [README.md](../README.md). This file keeps CLI-specific
-contracts focused.
-
-## Overview
-
-`virtrtlabctl` is the control CLI for VirtRTLab. It covers three concerns:
-
-1. **Lab orchestration** — load kernel modules + start `virtrtlabd` from a lab profile
-2. **Sysfs convenience** — read/write individual device attributes without raw `echo`/`cat`
-3. **Daemon lifecycle** — start, stop, and query `virtrtlabd` independently of module loading
-
-`virtrtlabctl` is implemented in **Python 3.11+** (stdlib only). It operates by reading
-and writing sysfs files (`/sys/kernel/virtrtlab/`) and by invoking the configured
-privilege path for module lifecycle and daemon control. In the normal installed
-profile this means service-mediated operations; in the development profile this
-may mean direct allowlisted process launches. It does **not** open the daemon
-sockets (`uart<N>.sock`) — those are reserved for simulators.
-
-Installed-system privilege expectations are defined in
-[privilege-model.md](privilege-model.md). In the target v1 deployment model, a
-user in group `virtrtlab` can perform routine CLI operations without interactive
-`sudo`; privileged module-management transitions are mediated by the installed
-service profile or by the development/CI profile.
+`virtrtlabctl` is the command-line interface for VirtRTLab. It manages the lab lifecycle (loading modules, starting the daemon), reads and writes sysfs attributes, injects faults, and emits the AUT integration contract.
 
 ---
 
-## Command structure
+## Synopsis
 
 ```
-virtrtlabctl [--json] [--no-sudo] <command> [<subcommand>] [<args>]
+virtrtlabctl [--json] [--no-sudo] <command> [options]
 ```
 
-| Global flag | Description |
-|-------------|-------------|
-| `--json` | Switch all output to machine-readable JSON (see [Output format](#output-format)) |
-| `--no-sudo` | Do not prepend `sudo` to privileged operations on the direct development path (`insmod`, `rmmod`, direct `virtrtlabd` launch). Use when the caller already has the required privilege path (e.g. installed service mediation, development sudoers profile, root shell, CI container) |
+### Global flags
 
-### `up` — bring up a lab profile
+| Flag | Description |
+|---|---|
+| `--json` | Emit all output as JSON (machine-readable). Errors are also JSON: `{"error": "...", "code": N}` |
+| `--no-sudo` | Do not prepend `sudo` to privileged operations. Use when already running as root or with capabilities. |
+
+---
+
+## Commands
+
+### `up` — Bring up a lab
+
+Loads kernel modules, starts the daemon, and emits the AUT integration contract.
 
 ```
-virtrtlabctl up [--config <file>] [--uart <N>] [--gpio <N>]
+virtrtlabctl up [--config FILE] [--uart N] [--gpio N]
 ```
-
-Loads the required kernel modules and starts `virtrtlabd` according to a lab profile.
-Idempotent if the profile is already active (modules already loaded, daemon already
-running); prints a warning and exits `0`.
-
-Steps performed in order:
-
-1. Resolve the lab profile (see [Lab profile](#lab-profile)).
-2. For each device type in the profile (in declaration order):
-  - Request module activation through the configured privilege path.
-  - Normal installed profile: use the installed service mediation path.
-  - Development profile: run `insmod <module>.ko <param>=<count>` through the
-    targeted allowlist or an already-privileged shell if the module is not
-    already loaded.
-  - On failure: roll back already-activated modules in reverse order, exit `1`.
-3. Activate `virtrtlabd` through the configured privilege path.
-  - Normal installed profile: request daemon/service mediation according to
-    [privilege-model.md](privilege-model.md).
-  - Development profile: launch `virtrtlabd --num-uarts <N> --run-dir /run/virtrtlab`
-    through the targeted allowlist or an already-privileged shell.
-  The active path must ensure the daemon PID is recorded at
-  `/run/virtrtlab/daemon.pid` and the ordered list of loaded modules is recorded
-  at `/run/virtrtlab/modules.list`.
-4. Poll for the appearance of **all** expected sockets (`uart0.sock` … `uart<N-1>.sock`)
-   for up to 5 seconds. Exit `3` on timeout. Waiting for all sockets is required: a
-   test connecting to `uart1.sock` immediately after `up` returns must not race against
-   a partially-started daemon.
-5. Resolve and print the AUT integration contract for every loaded device. For UART,
-  this includes the AUT-facing TTY path. For GPIO, this includes the AUT-facing
-  gpiochip path, the legacy sysfs base number when available, and the VirtRTLab
-  control root.
-
-Options:
 
 | Option | Description |
-|--------|-------------|
-| `--config <file>` | Path to a TOML lab profile (default: `./lab.toml`, then `/etc/virtrtlab/lab.toml`) |
-| `--uart <N>` | Inline override: N UART instances. Generates a transient profile; no file needed. |
-| `--gpio <N>` | Inline override: N GPIO instances. |
+|---|---|
+| `--config FILE` | Path to a TOML lab profile. Overrides `--uart` and `--gpio`. |
+| `--uart N` | Number of UART instances to load (default: 1) |
+| `--gpio N` | Number of GPIO instances to load (default: 0) |
 
-Inline overrides (`--uart`, `--gpio`, …) take precedence over `--config`.
-If both a config file and inline overrides are present, the inline values replace
-the corresponding sections of the file profile; unmentioned device types come from the file.
+**What it does:**
 
-On success, `up` prints export hints suitable for direct copy/paste in a shell.
-The exact contract is defined in [device-contract.md](device-contract.md).
-If the host kernel does not expose legacy `/sys/class/gpio`, `up` still succeeds
-for GPIO devices and omits `VIRTRTLAB_GPIOBASE<N>` with a warning.
+1. Locates `virtrtlab_core.ko`, `virtrtlab_uart.ko`, `virtrtlab_gpio.ko` (searches `MODULE_DIR`, current directory, `modinfo`, installed modules).
+2. Calls `insmod` for each required module.
+3. Starts `virtrtlabd` for UART instances.
+4. Waits up to 5 s for all daemon sockets to appear.
+5. Emits the AUT integration contract on stdout.
 
-### `down` — tear down a lab
+**Output (shell format, default):**
+
+```sh
+VIRTRTLAB_UART_TTY=ttyVIRTLAB0
+VIRTRTLAB_UART_SOCK=/run/virtrtlab/uart0.sock
+VIRTRTLAB_GPIO_CHIP=/dev/gpiochip4
+VIRTRTLAB_GPIO_SYSFS_BASE=496
+```
+
+Use `eval $()` to export these into your shell session:
+
+```sh
+eval $(sudo virtrtlabctl up --uart 1 --gpio 1)
+```
+
+**Output (JSON, with `--json`):**
+
+```json
+{
+  "devices": [
+    {"type": "uart", "index": 0, "tty": "ttyVIRTLAB0", "sock": "/run/virtrtlab/uart0.sock"},
+    {"type": "gpio", "index": 0, "chip": "/dev/gpiochip4", "sysfs_base": 496}
+  ]
+}
+```
+
+**Exit codes:**
+
+| Code | Meaning |
+|---|---|
+| 0 | Lab is up |
+| 1 | Module load or daemon start failed |
+
+---
+
+### `down` — Tear down the lab
+
+Stops the daemon and unloads modules.
 
 ```
 virtrtlabctl down
 ```
 
-Requests daemon shutdown and module teardown through the same configured
-privilege path used by `up`. On the direct development path, daemon shutdown is
-SIGTERM + wait up to 5 s, then SIGKILL, followed by `rmmod` in reverse module
-insertion order. Module list is read from `/run/virtrtlab/modules.list`
-(written by `up`).
+**What it does:**
 
-If `modules.list` is absent, `down` prints a warning to stderr and attempts a
-best-effort teardown of all known modules (`virtrtlab_gpio`, `virtrtlab_uart`,
-`virtrtlab_core`) in that order on the direct development path. Exit `0` even
-if some modules were already unloaded; a missing module is not an error on
-teardown.
+1. Sends SIGTERM to `virtrtlabd` and waits for it to exit cleanly.
+2. Calls `rmmod` for `virtrtlab_gpio`, `virtrtlab_uart`, `virtrtlab_core` in dependency order.
 
-### `status` — global lab status
+**Exit codes:**
+
+| Code | Meaning |
+|---|---|
+| 0 | Lab torn down successfully |
+| 1 | Error during teardown (partial unload) |
+
+---
+
+### `status` — Global lab status
 
 ```
 virtrtlabctl status
 ```
 
-Reports:
+Prints the status of modules, daemon, sockets, and the virtual bus.
 
-- Whether each known module is loaded (`/proc/modules`)
-- Daemon PID and running state (`/run/virtrtlab/daemon.pid` + `/proc/<pid>/status`)
-- List of active sockets under `/run/virtrtlab/`
-- Bus state (`/sys/kernel/virtrtlab/buses/vrtlbus0/state`)
-
-Human output example:
+**Output (default):**
 
 ```
 modules:
-  virtrtlab_core   loaded
-  virtrtlab_uart   loaded (2 instances)
-  virtrtlab_gpio   not loaded
-
+  virtrtlab_core    loaded
+  virtrtlab_uart    loaded
+  virtrtlab_gpio    loaded
 daemon:
-  pid    12345
-  state  running
-
+  state             running
+  pid               12345
 sockets:
-  /run/virtrtlab/uart0.sock
-  /run/virtrtlab/uart1.sock
-
-bus vrtlbus0:
-  state  up
+  /run/virtrtlab/uart0.sock   present
+bus:
+  vrtlbus0          up
 ```
 
-JSON output: see [Output format](#output-format).
+**Output (JSON):**
 
-### `list` — discover buses and devices
+```json
+{
+  "modules": {"core": "loaded", "uart": "loaded", "gpio": "loaded"},
+  "daemon": {"state": "running", "pid": 12345},
+  "sockets": [{"path": "/run/virtrtlab/uart0.sock", "present": true}],
+  "bus": {"vrtlbus0": "up"}
+}
+```
+
+---
+
+### `list` — Discover buses and devices
 
 ```
 virtrtlabctl list buses
-virtrtlabctl list devices [--type <type>]
+virtrtlabctl list devices [--type TYPE]
 ```
 
-Reads `/sys/kernel/virtrtlab/buses/` and `/sys/kernel/virtrtlab/devices/` respectively.
-`--type` filters by the `type` sysfs attribute (`uart`, `gpio`, etc.).
+**`list buses`** — lists all virtual buses registered in sysfs.
 
-### `get` — read a sysfs attribute
+**`list devices`** — lists all registered devices. Use `--type uart` or `--type gpio` to filter.
 
-```
-virtrtlabctl get <device> <attr>
-virtrtlabctl get bus <attr>
-```
-
-Reads `/sys/kernel/virtrtlab/devices/<device>/<attr>` or
-`/sys/kernel/virtrtlab/buses/vrtlbus0/<attr>` and prints the value (trailing newline
-stripped).
-
-Examples:
-
-```bash
-virtrtlabctl get uart0 baud          # → 115200
-virtrtlabctl get uart0 latency_ns    # → 0
-virtrtlabctl get bus state           # → up
-```
-
-If the attribute file does not exist: print error to stderr, exit `4`.
-If `open()` or `read()` returns an error: print the errno message, exit `4`.
-
-### `set` — write a sysfs attribute
+**Output example:**
 
 ```
-virtrtlabctl set <device> <attr>=<value> [<attr>=<value> …]
-virtrtlabctl set bus <attr>=<value>
+uart0   uart    vrtlbus0    enabled
+gpio0   gpio    vrtlbus0    enabled
 ```
 
-Writes each `<attr>=<value>` pair to the corresponding sysfs file.
-Multiple pairs are applied left-to-right; a failure on any pair stops the sequence
-and exits `4` (previously applied pairs are **not** rolled back — sysfs writes are
-not transactional).
+**JSON output:**
 
-Examples:
-
-```bash
-virtrtlabctl set uart0 latency_ns=500000 drop_rate_ppm=20000
-virtrtlabctl set bus state=down
+```json
+[
+  {"name": "uart0", "type": "uart", "bus": "vrtlbus0", "enabled": true},
+  {"name": "gpio0", "type": "gpio", "bus": "vrtlbus0", "enabled": true}
+]
 ```
 
-| Exit code | Condition |
-|-----------|-----------|
-| `0` | All writes accepted by the kernel |
-| `2` | `<attr>=<value>` parse error |
-| `4` | Kernel returned an error (`-EINVAL`, `-EBUSY`, `-EIO`, …) |
+---
 
-### `stats` — display per-device counters
+### `get` — Read a sysfs attribute
+
+```
+virtrtlabctl get <target> <attr>
+```
+
+| Argument | Description |
+|---|---|
+| `target` | Device name (`uart0`, `gpio0`) or bus name (`vrtlbus0`) |
+| `attr` | Attribute name (e.g. `baud`, `latency_ns`, `chip_path`) |
+
+**Examples:**
+
+```sh
+virtrtlabctl get uart0 baud
+# 115200
+
+virtrtlabctl get uart0 latency_ns
+# 0
+
+virtrtlabctl get gpio0 chip_path
+# /dev/gpiochip4
+
+virtrtlabctl get vrtlbus0 state
+# up
+```
+
+**JSON output:**
+
+```sh
+virtrtlabctl --json get uart0 baud
+# {"device": "uart0", "attr": "baud", "value": "115200"}
+```
+
+**Exit codes:**
+
+| Code | Meaning |
+|---|---|
+| 0 | Success |
+| 2 | Device or attribute not found |
+
+---
+
+### `set` — Write sysfs attribute(s)
+
+```
+virtrtlabctl set <target> <attr=value> [<attr=value> …]
+```
+
+Multiple assignments are applied in order. The command fails fast on the first error.
+
+**Examples:**
+
+```sh
+# Arm a 500 µs latency fault
+virtrtlabctl set uart0 latency_ns=500000
+
+# Add 10% jitter on top
+virtrtlabctl set uart0 jitter_ns=50000
+
+# Drop 5% of bytes (50,000 PPM)
+virtrtlabctl set uart0 drop_rate_ppm=50000
+
+# Flip bits in 1% of bytes
+virtrtlabctl set uart0 bitflip_rate_ppm=10000
+
+# Multiple assignments in one call
+virtrtlabctl set uart0 latency_ns=0 jitter_ns=0 drop_rate_ppm=0
+
+# Disable a device
+virtrtlabctl set uart0 enabled=0
+
+# Halt the bus
+virtrtlabctl set vrtlbus0 state=down
+
+# Reset the bus (clears faults, re-enables all devices, resets stats)
+virtrtlabctl set vrtlbus0 state=reset
+```
+
+**Exit codes:**
+
+| Code | Meaning |
+|---|---|
+| 0 | All assignments applied |
+| 2 | Device or attribute not found |
+| 1 | Write rejected by kernel (invalid value, `-EINVAL`, `-EBUSY`) |
+
+---
+
+### `stats` — Display per-device counters
 
 ```
 virtrtlabctl stats <device>
 ```
 
-Reads all files under `/sys/kernel/virtrtlab/devices/<device>/stats/` and prints them.
+**Examples:**
 
-Human output example:
-
-```
-uart0 stats:
-  tx_bytes     1048576
-  rx_bytes     4096
-  drops        3
-  overruns     0
-  bitflips     1
+```sh
+virtrtlabctl stats uart0
 ```
 
-### `reset` — reset stats counters
+Output:
+
+```
+tx_bytes     102400
+rx_bytes      98304
+overruns          0
+drops           512
+```
+
+```sh
+virtrtlabctl stats gpio0
+```
+
+Output:
+
+```
+value_changes    47
+bitflips          3
+drops             0
+```
+
+**JSON output:**
+
+```sh
+virtrtlabctl --json stats uart0
+# {"device":"uart0","tx_bytes":102400,"rx_bytes":98304,"overruns":0,"drops":512}
+```
+
+---
+
+### `reset` — Reset stats counters
 
 ```
 virtrtlabctl reset <device>
 ```
 
-Writes `0` to `/sys/kernel/virtrtlab/devices/<device>/stats/reset`.
+Resets all stats counters for the device to zero (writes `0` to `stats/reset`). Does **not** clear fault attributes or device `enabled` state.
 
-This resets stats counters only. For a full device reset (fault attrs + `enabled` + stats),
-write `reset` to the bus state attribute:
-
-```bash
-virtrtlabctl set bus state=reset
+```sh
+virtrtlabctl reset uart0
+virtrtlabctl reset gpio0
 ```
 
-### `inject` — inject a GPIO line value
+To reset everything (fault attrs, enabled state, stats), use the bus reset:
+
+```sh
+virtrtlabctl set vrtlbus0 state=reset
+```
+
+---
+
+### `inject` — Inject a GPIO line value
 
 ```
 virtrtlabctl inject <device> <line> <value>
 ```
 
-Writes a physical value to a GPIO input line on a VirtRTLab GPIO device. This
-triggers the full 7-step fault injection shim (latency, jitter, drop gate, bitflip
-gate) defined in [sysfs.md](sysfs.md#harness-injection-path).
+| Argument | Description |
+|---|---|
+| `device` | GPIO device name, e.g. `gpio0` |
+| `line` | GPIO line index, 0–7 |
+| `value` | Physical value: `0` (LOW) or `1` (HIGH) |
 
-Arguments:
+This writes `<line>:<value>` to `/sys/kernel/virtrtlab/devices/<device>/inject`. Active fault attributes (`latency_ns`, `jitter_ns`, `drop_rate_ppm`, `bitflip_rate_ppm`) are applied to the transition.
 
-| Argument | Type | Description |
-|----------|------|-------------|
-| `<device>` | string | GPIO device name as seen in sysfs (e.g. `gpio0`) |
-| `<line>` | integer | Zero-based line index, **0..7** |
-| `<value>` | integer | Physical value to inject: **0** (low) or **1** (high) |
+**Examples:**
 
-The command resolves the sysfs path
-`/sys/kernel/virtrtlab/devices/<device>/inject` and writes `"<line>:<value>"` to it.
+```sh
+# Set line 0 HIGH
+virtrtlabctl inject gpio0 0 1
 
-Exit codes:
+# Set line 3 LOW
+virtrtlabctl inject gpio0 3 0
 
-| Code | Condition |
-|------|-----------|
-| `0` | Injection accepted by the kernel |
-| `2` | `<line>` or `<value>` argument is invalid |
-| `4` | Device not found in sysfs or kernel rejected the write |
-
-Human output example:
-
-```
-gpio0 line 3 ← 1
+# Set line 1 HIGH with an active latency fault
+virtrtlabctl set gpio0 latency_ns=200000
+virtrtlabctl inject gpio0 1 1
 ```
 
-JSON output example:
+**Exit codes:**
 
-```json
-{"device": "gpio0", "line": 3, "value": 1, "status": "ok"}
+| Code | Meaning |
+|---|---|
+| 0 | Injection accepted |
+| 2 | Device not found |
+| 1 | Invalid line or value |
+
+---
+
+### `daemon` — Manage `virtrtlabd` independently
+
+Manages the daemon lifecycle without touching kernel modules. Useful when the modules are already loaded and you only want to restart the relay daemon.
+
 ```
-
-### `daemon` — manage `virtrtlabd` independently
-
-```
-virtrtlabctl daemon start [--num-uarts <N>] [--run-dir <dir>]
+virtrtlabctl daemon start [--num-uarts N] [--run-dir DIR]
 virtrtlabctl daemon stop
 virtrtlabctl daemon status
 ```
 
-`daemon start` activates `virtrtlabd` through the configured privilege path. In the
-normal installed profile this means the installed service path; in the development
-profile this may mean a direct background launch via `sudo` unless `--no-sudo`.
-The active path writes the PID to `/run/virtrtlab/daemon.pid`. Fails with exit `3`
-if a daemon is already running (pid-file exists and process is alive).
+| Subcommand | Description |
+|---|---|
+| `start` | Start the daemon. Fails with exit 3 if already running. |
+| `stop` | Send SIGTERM and wait for clean exit. |
+| `status` | Print daemon state and PID. Exit 0 if running, 3 if stopped. |
 
-`daemon stop` requests daemon shutdown through the same configured privilege path,
-then waits up to 5 s for the recorded process to exit and escalates to SIGKILL on
-the direct development path if still running.
+**Options for `daemon start`:**
 
-`daemon status` prints daemon PID and running state. Exit `3` if not running.
+| Option | Default | Description |
+|---|---|---|
+| `--num-uarts N` | `1` | Number of UART sockets to create |
+| `--run-dir DIR` | `/run/virtrtlab` | Directory for PID file and sockets |
+
+**Examples:**
+
+```sh
+# Start daemon for 2 UART instances
+sudo virtrtlabctl daemon start --num-uarts 2
+
+# Check status
+virtrtlabctl daemon status
+# state  running
+# pid    9876
+
+# Stop gracefully
+sudo virtrtlabctl daemon stop
+```
+
+**Exit codes for `daemon status`:**
+
+| Code | Meaning |
+|---|---|
+| 0 | Daemon is running |
+| 3 | Daemon is stopped |
 
 ---
 
-## Lab profile
+## Lab profiles (TOML)
 
-A lab profile is a TOML file describing the desired hardware configuration.
+A TOML profile lets you version-control your lab configuration.
 
 ```toml
 # lab.toml
-
-[build]
-module_dir = "/home/user/projects/virtrtlab/kernel"  # optional; path to .ko files
-
-[bus]
-seed = 42          # optional; written to /sys/.../buses/vrtlbus0/seed after up
-
-[[devices]]
-type  = "uart"
+[uart]
 count = 2
 
-[[devices]]
-type  = "gpio"
+[gpio]
 count = 1
 ```
 
-The `[build]` section is optional. If `module_dir` is set, `.ko` files are searched
-there first, then `./`, then `/lib/modules/$(uname -r)/`. This covers the common
-development case where modules are built in-tree without `make install`.
+Usage:
 
-### Profile resolution order
-
-1. `--config <file>` if specified
-2. `./lab.toml` in the current working directory
-3. `/etc/virtrtlab/lab.toml`
-4. If none found and no inline overrides: error, exit `2`
-
-### Module mapping
-
-| `type` in profile | Kernel module | `insmod` parameter |
-|---|---|---|
-| `uart` | `virtrtlab_uart.ko` | `num_uart_devices=<count>` |
-| `gpio` | `virtrtlab_gpio.ko` | `num_gpio_devs=<count>` |
-
-Any unknown `type` value causes `up` to fail immediately with exit `2` and a clear
-error message (`unknown device type: <type>`). SPI, ADC, DAC types are reserved for
-v0.2.0 and are not supported in v0.1.0.
-
-Module search order: `[build].module_dir` (if set) → `./` → `/lib/modules/$(uname -r)/`.
+```sh
+sudo virtrtlabctl up --config lab.toml
+```
 
 ---
 
-## Exit codes
+## Complete fault injection example
+
+```sh
+# 1. Bring up the lab
+eval $(sudo virtrtlabctl up --uart 1 --gpio 1)
+
+# 2. Confirm lab state
+virtrtlabctl status
+virtrtlabctl list devices
+
+# 3. Arm a UART fault: 2% drop + 100 µs latency
+virtrtlabctl set uart0 drop_rate_ppm=20000 latency_ns=100000
+
+# 4. Connect a simulator
+socat - UNIX-CONNECT:/run/virtrtlab/uart0.sock &
+
+# 5. Run your AUT (10 s timeout)
+timeout 10 "$AUT_BINARY" "$VIRTRTLAB_UART_TTY"
+echo "AUT exit: $?"
+
+# 6. Check stats
+virtrtlabctl stats uart0
+
+# 7. Clear faults, reset stats
+virtrtlabctl set uart0 drop_rate_ppm=0 latency_ns=0
+virtrtlabctl reset uart0
+
+# 8. Tear down
+sudo virtrtlabctl down
+```
+
+---
+
+## Exit code summary
 
 | Code | Meaning |
-|------|---------|
-| `0` | Success |
-| `1` | Module load/unload failure |
-| `2` | Invalid arguments or profile parse error |
-| `3` | Daemon error (not running, timeout, socket missing) |
-| `4` | Kernel attribute write rejected or sysfs path missing |
+|---|---|
+| 0 | Success |
+| 1 | General error (load failure, daemon error, write rejected) |
+| 2 | Not found (device, attribute, module) |
+| 3 | Daemon not running (used by `daemon status`) |
 
 ---
 
-## Output format
+## See also
 
-### Human-readable (default)
-
-Key-value pairs or plain values, one per line. No fixed schema — optimised for
-readability in a terminal.
-
-### JSON (`--json`)
-
-A single JSON object is printed to stdout on success. On error, a JSON object with
-an `"error"` key is printed to stdout and the process exits with the appropriate code.
-
-`list devices --json` example:
-
-```json
-{
-  "devices": [
-    {"name": "uart0", "type": "uart", "bus": "vrtlbus0", "enabled": true},
-    {"name": "uart1", "type": "uart", "bus": "vrtlbus0", "enabled": true}
-  ]
-}
-```
-
-`stats uart0 --json` example:
-
-```json
-{
-  "device": "uart0",
-  "stats": {
-    "tx_bytes": 1048576,
-    "rx_bytes": 4096,
-    "drops": 3,
-    "overruns": 0,
-    "bitflips": 1
-  }
-}
-```
-
-Error example:
-
-```json
-{"error": "kernel rejected write to latency_ns: Invalid argument", "code": 4}
-```
-
-`up --json` example:
-
-```json
-{
-  "devices": [
-    {
-      "name": "uart0",
-      "type": "uart",
-      "aut_path": "/dev/ttyVIRTLAB0",
-      "wire_path": "/dev/virtrtlab-wire0",
-      "socket_path": "/run/virtrtlab/uart0.sock",
-      "env": {
-        "VIRTRTLAB_UART0": "/dev/ttyVIRTLAB0"
-      }
-    },
-    {
-      "name": "gpio0",
-      "type": "gpio",
-      "chip_path": "/dev/gpiochip4",
-      "sysfs_base": 200,
-      "control_path": "/sys/kernel/virtrtlab/devices/gpio0",
-      "env": {
-        "VIRTRTLAB_GPIOCHIP0": "/dev/gpiochip4",
-        "VIRTRTLAB_GPIOBASE0": "200",
-        "VIRTRTLAB_GPIOCTRL0": "/sys/kernel/virtrtlab/devices/gpio0"
-      }
-    }
-  ]
-}
-```
-
-If the host lacks the legacy GPIO sysfs ABI, `sysfs_base` is omitted and a
-warning is reported instead. This does not make `up` fail.
-
----
-
-## Rationale
-
-**Python over C** — `virtrtlabctl` is a control tool, not a relay. Its operations
-are sysfs file reads/writes and process lifecycle management. There is no hot path, no
-latency constraint, and no GC interference risk. Python argparse, `pathlib`, `tomllib`
-(stdlib since 3.11), and `subprocess` cover all requirements without additional
-dependencies. C would add ~300 lines of boilerplate for argument parsing alone with
-no observable benefit.
-
-**TOML for lab profiles** — TOML is human-readable, supports typed arrays of tables
-(`[[devices]]`) cleanly, and is in the Python stdlib since 3.11 (`tomllib`). YAML
-requires `pyyaml` (external dependency). INI (`configparser`) cannot represent arrays
-of typed sections without custom parsing. JSON lacks comments, which are useful for
-documenting seed values and device counts in committed CI profiles.
-
-**`up`/`down` as first-class commands** — device count is a property of the lab, not
-of individual CLI invocations. Expressing it in a committed `lab.toml` makes the
-configuration reviewable and reproducible in CI. Inline `--uart`/`--gpio` flags provide
-a one-liner escape for scripting without a file.
-
-**`daemon start`/`stop` separate from `up`/`down`** — `up` and `down` are full lab
-lifecycle operations (modules + daemon). `daemon start`/`stop` allows controlling the
-daemon independently when the kernel modules are managed externally (e.g. by a test
-fixture that loads/unloads modules per test class).
-
-**Stats reset writes `0`, not `reset`** — writing `reset` to `stats/reset` is kernel
-write-only by spec (returns `-EPERM` on read). The value `0` is the documented trigger
-(see `docs/sysfs.md`). Full device reset (including fault attrs) requires writing
-`reset` to the bus `state` attribute, which is intentionally a separate, more
-destructive operation.
-
-**Installed profile and development profile stay distinct** — in the normal
-installed profile, `virtrtlabctl` relies on service-mediated privilege handling.
-In the development profile, it may prepend `sudo` to direct privileged operations
-such as `insmod`, `rmmod`, and direct `virtrtlabd` launch. `--no-sudo` disables
-that direct-path behaviour for callers that already hold the required privileges.
-
-**`module_dir` in `[build]`** — out-of-tree development is the primary use case during
-v0.1.0; requiring `make install` before `virtrtlabctl up` would block fast iteration.
-The `[build].module_dir` key covers this without polluting device sections.
-
-**`up` waits for all sockets** — the instance count is known at poll time (from the
-resolved profile). Waiting only for `uart0.sock` would be a false signal of readiness
-for any test that connects to `uart1.sock` or higher immediately after `up`.
-
-**`down` without `modules.list` warns, does not fail** — teardown must never leave
-the system in a worse state. A best-effort rmmod on known modules with a warning is
-safe; a hard failure would require manual cleanup.
-
-**SPI/ADC/DAC deferred to v0.2.0** — unknown type values fail fast with a clear error
-in v0.1.0 rather than silently succeeding or ignoring the section.
+- [daemon.md](daemon.md) — `virtrtlabd` user guide (direct daemon usage, logging, signals)
+- [sysfs.md](sysfs.md) — full sysfs attribute reference
+- [spec.md](spec.md) — architecture and AUT integration contract details
