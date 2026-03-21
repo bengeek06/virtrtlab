@@ -649,7 +649,7 @@ static ssize_t sysfs_base_show(struct device *dev, struct device_attribute *attr
 
 	if (gdev->gc.base < 0)
 		return -EPERM;
-	return sysfs_emit(buf, "%u\n", (unsigned int)gdev->gc.base);
+	return sysfs_emit(buf, "%u\n", (u32)gdev->gc.base);
 }
 static DEVICE_ATTR_RO(sysfs_base);
 #endif /* CONFIG_GPIO_SYSFS */
