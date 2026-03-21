@@ -121,8 +121,10 @@ virtrtlabctl down
 
 | Code | Meaning |
 |---|---|
-| 0 | Lab torn down successfully |
-| 1 | Error during teardown (partial unload) |
+| 0 | Command completed; module unloads are best-effort and do not affect the exit code |
+
+> If some modules fail to unload (e.g. still in use by a process), they are
+> silently skipped. Check `virtrtlabctl status` or `lsmod` to verify.
 
 ---
 
@@ -138,26 +140,33 @@ Prints the status of modules, daemon, sockets, and the virtual bus.
 
 ```
 modules:
-  virtrtlab_core    loaded
-  virtrtlab_uart    loaded
-  virtrtlab_gpio    loaded
+  virtrtlab_core            loaded
+  virtrtlab_uart            loaded
+  virtrtlab_gpio            loaded
+
 daemon:
-  state             running
-  pid               12345
+  pid    12345
+  state  running
+
 sockets:
-  /run/virtrtlab/uart0.sock   present
-bus:
-  vrtlbus0          up
+  /run/virtrtlab/uart0.sock
+
+bus vrtlbus0:
+  state  up
 ```
 
 **Output (JSON):**
 
 ```json
 {
-  "modules": {"core": "loaded", "uart": "loaded", "gpio": "loaded"},
+  "modules": {
+    "virtrtlab_core": "loaded",
+    "virtrtlab_uart": "loaded",
+    "virtrtlab_gpio": "loaded"
+  },
   "daemon": {"state": "running", "pid": 12345},
-  "sockets": [{"path": "/run/virtrtlab/uart0.sock", "present": true}],
-  "bus": {"vrtlbus0": "up"}
+  "sockets": ["/run/virtrtlab/uart0.sock"],
+  "bus": {"vrtlbus0": {"state": "up"}}
 }
 ```
 
@@ -174,20 +183,26 @@ virtrtlabctl list devices [--type TYPE]
 
 **`list devices`** — lists all registered devices. Use `--type uart` or `--type gpio` to filter.
 
-**Output example:**
+**Output example (`list devices`):**
 
 ```
-uart0   uart    vrtlbus0    enabled
-gpio0   gpio    vrtlbus0    enabled
+uart0                type=uart     bus=vrtlbus0     enabled=yes
+gpio0                type=gpio     bus=vrtlbus0     enabled=yes
 ```
 
-**JSON output:**
+**JSON output (`list devices`):**
 
 ```json
-[
+{"devices": [
   {"name": "uart0", "type": "uart", "bus": "vrtlbus0", "enabled": true},
   {"name": "gpio0", "type": "gpio", "bus": "vrtlbus0", "enabled": true}
-]
+]}
+```
+
+**JSON output (`list buses`):**
+
+```json
+{"buses": ["vrtlbus0"]}
 ```
 
 ---
@@ -223,7 +238,7 @@ virtrtlabctl get vrtlbus0 state
 
 ```sh
 virtrtlabctl --json get uart0 baud
-# {"device": "uart0", "attr": "baud", "value": "115200"}
+# {"target": "uart0", "attr": "baud", "value": "115200"}
 ```
 
 **Exit codes:**
@@ -231,7 +246,7 @@ virtrtlabctl --json get uart0 baud
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 2 | Device or attribute not found |
+| 4 | Target or attribute not found |
 
 ---
 
@@ -276,8 +291,8 @@ virtrtlabctl set vrtlbus0 state=reset
 | Code | Meaning |
 |---|---|
 | 0 | All assignments applied |
-| 2 | Device or attribute not found |
-| 1 | Write rejected by kernel (invalid value, `-EINVAL`, `-EBUSY`) |
+| 2 | Invalid `attr=value` syntax (missing `=`, empty attribute name) |
+| 4 | Attribute not found, or kernel rejected the write (`-EINVAL`, `-EBUSY`, …) |
 
 ---
 
@@ -296,10 +311,11 @@ virtrtlabctl stats uart0
 Output:
 
 ```
-tx_bytes     102400
-rx_bytes      98304
-overruns          0
-drops           512
+uart0 stats:
+  tx_bytes             102400
+  rx_bytes              98304
+  overruns                  0
+  drops                   512
 ```
 
 ```sh
@@ -309,16 +325,17 @@ virtrtlabctl stats gpio0
 Output:
 
 ```
-value_changes    47
-bitflips          3
-drops             0
+gpio0 stats:
+  bitflips                  3
+  drops                     0
+  value_changes            47
 ```
 
 **JSON output:**
 
 ```sh
 virtrtlabctl --json stats uart0
-# {"device":"uart0","tx_bytes":102400,"rx_bytes":98304,"overruns":0,"drops":512}
+# {"device": "uart0", "stats": {"tx_bytes": 102400, "rx_bytes": 98304, "overruns": 0, "drops": 512}}
 ```
 
 ---
@@ -432,14 +449,24 @@ sudo virtrtlabctl daemon stop
 ## Lab profiles (TOML)
 
 A TOML profile lets you version-control your lab configuration.
+Devices are declared as an array of tables under `[[devices]]`.
 
 ```toml
 # lab.toml
-[uart]
+
+[[devices]]
+type = "uart"
 count = 2
 
-[gpio]
+[[devices]]
+type = "gpio"
 count = 1
+
+[build]
+# module_dir = "/path/to/built/modules"  # optional; overrides module search path
+
+[bus]
+# seed = 42  # optional PRNG seed written to vrtlbus0/seed at startup
 ```
 
 Usage:
@@ -447,6 +474,10 @@ Usage:
 ```sh
 sudo virtrtlabctl up --config lab.toml
 ```
+
+Inline flags (`--uart N`, `--gpio N`) override the corresponding `[[devices]]` entries
+from the profile. A profile is not required: if neither `--config` nor inline flags are
+given, `virtrtlabctl` searches for `./lab.toml` and `/etc/virtrtlab/lab.toml`.
 
 ---
 

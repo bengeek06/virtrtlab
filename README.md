@@ -66,7 +66,7 @@ Components:
 
 | Requirement | Debian/Ubuntu package |
 |---|---|
-| Linux ≥ 5.10 | — |
+| Linux ≥ 5.15 | — |
 | Kernel build headers | `linux-headers-$(uname -r)` |
 | C compiler | `build-essential` |
 | Python ≥ 3.11 | `python3` |
@@ -103,22 +103,12 @@ most features. The following `CONFIG_` options are needed:
 | `CONFIG_TTY` | bool | virtrtlab_uart | ✅ yes |
 | `CONFIG_GPIOLIB` | bool | virtrtlab_gpio | ✅ yes |
 | `CONFIG_GPIO_CDEV` | bool | virtrtlab_gpio (chardev API) | ✅ yes |
-| `CONFIG_IRQ_SIM` | **bool** | virtrtlab_gpio (edge events) | ⚠️ **often missing** |
+| `CONFIG_IRQ_SIM` | **bool** | virtrtlab_gpio (GPIO edge events, **planned v0.2.0**) | ⚠️ often missing |
 
-`CONFIG_IRQ_SIM` is the exception: it is a `bool` option (cannot be a module)
-used by the gpiolib irqchip layer to back GPIO edge-event notifications.
-If it is absent from your running kernel, GPIO edge events to the AUT are
-not available and a kernel rebuild is required.
-
-To check your kernel:
-
-```sh
-grep -E "CONFIG_TTY|CONFIG_GPIOLIB|CONFIG_GPIO_CDEV|CONFIG_IRQ_SIM" /boot/config-$(uname -r)
-```
-
-All should be `=y`. If `CONFIG_IRQ_SIM` is missing, see the recompilation
-procedure below. See also [docs/kernel-requirements.md](docs/kernel-requirements.md)
-for the full option reference.
+`CONFIG_IRQ_SIM` is **not required for v0.1.0**: the current driver implements
+GPIO line state injection but not yet the irqchip edge-event path. It is listed
+here as a forward reference so you can prepare your kernel in advance.
+See [docs/kernel-requirements.md](docs/kernel-requirements.md) for details.
 
 #### Recompiling the kernel on Debian/Ubuntu (advanced)
 
@@ -154,13 +144,14 @@ make olddefconfig
 scripts/config --enable CONFIG_TTY
 scripts/config --enable CONFIG_GPIOLIB
 scripts/config --enable CONFIG_GPIO_CDEV
+# Optional: enable now for v0.2.0 GPIO edge-event support (not required in v0.1.0)
 scripts/config --enable CONFIG_IRQ_SIM
 make olddefconfig
 ```
 
-`CONFIG_IRQ_SIM` is the key option: it is a `bool` that must be built into
-`vmlinux` (not a loadable module). It enables the simulated IRQ domain used
-by the gpiolib irqchip layer for GPIO edge-event notifications.
+`CONFIG_IRQ_SIM` is a `bool` that must be built into `vmlinux` (not a loadable
+module). It will be required by `virtrtlab_gpio` when GPIO edge-event notifications
+via the irqchip layer are implemented (planned for v0.2.0). Safe to enable now.
 
 **5 — Build and install Debian packages**
 
@@ -346,5 +337,5 @@ See `examples/README.md` for full details on each scenario.
 
 ## License
 
-Source code: [MIT](SPDX-License-Identifier: MIT)  
-Documentation: [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/)
+Source code: [MIT](LICENSE.MIT)  
+Documentation: [CC-BY-4.0](LICENSE.CC-BY-4.0)

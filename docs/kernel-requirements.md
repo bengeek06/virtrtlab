@@ -25,12 +25,17 @@ grep -E "CONFIG_TTY|CONFIG_GPIOLIB|CONFIG_GPIO_CDEV" /boot/config-$(uname -r)
 
 All must be `=y`.
 
-## CONFIG_IRQ_SIM — the one that may require a kernel rebuild
+## CONFIG_IRQ_SIM — planned for v0.2.0 (GPIO edge events)
 
-`virtrtlab_gpio` registers a native `gpio_chip` via `gpiochip_add_data()` and
-supports edge-event notifications to the AUT via the GPIO v2 character device
-API. The gpiolib irqchip layer uses the **simulated IRQ domain** infrastructure
-(`irq_sim`) to back those events. This infrastructure is guarded by:
+> **Status (v0.1.0)**: `virtrtlab_gpio` does not yet implement the irqchip /
+> `irq_sim` integration. GPIO edge-event notifications to the AUT via the
+> GPIO v2 character device API are **planned for v0.2.0**. The current driver
+> only exposes the `inject` sysfs attribute for harness-driven line transitions.
+> `CONFIG_IRQ_SIM` is **not required** to build or run `virtrtlab_gpio` today.
+
+When the irqchip path is implemented, `virtrtlab_gpio` will use the **simulated
+IRQ domain** infrastructure (`irq_sim`) to back edge-event notifications. This
+infrastructure is guarded by:
 
 ```
 CONFIG_IRQ_SIM   (bool)
@@ -38,10 +43,10 @@ CONFIG_IRQ_SIM   (bool)
 
 Because it is a `bool` (not `tristate`), it **cannot be built as a module**: it
 must be compiled into `vmlinux`. If the running kernel lacks it, a kernel rebuild
-and reboot are required before `virtrtlab_gpio` can deliver edge events to the
+and reboot will be required before `virtrtlab_gpio` can deliver edge events to the
 AUT.
 
-### Checking your kernel
+### Checking your kernel (for future use)
 
 ```bash
 grep CONFIG_IRQ_SIM /boot/config-$(uname -r)
@@ -49,23 +54,18 @@ grep CONFIG_IRQ_SIM /boot/config-$(uname -r)
 # Bad:      # CONFIG_IRQ_SIM is not set
 ```
 
-Alternatively, check the kallsyms table:
-
-```bash
-grep -q "irq_sim" /proc/kallsyms && echo "IRQ_SIM present" || echo "IRQ_SIM MISSING"
-```
-
-### Impact
+### Impact (v0.2.0 and later)
 
 | Feature | Without `CONFIG_IRQ_SIM` | With `CONFIG_IRQ_SIM=y` |
 |---|---|---|
 | UART emulation | ✅ full | ✅ full |
 | GPIO line state injection | ✅ full | ✅ full |
-| GPIO edge events to AUT | ❌ not available | ✅ full |
+| GPIO edge events to AUT | ❌ not available (v0.2.0+) | ✅ full (v0.2.0+) |
 | GPIO AUT tests (edge-based) | ❌ skipped by pytest | ✅ run |
 
-GPIO **state injection** and UART emulation work without `CONFIG_IRQ_SIM`. Only
-AUTs that listen for GPIO edge events via `GPIO_V2_LINE_EVENT_*` are affected.
+GPIO **state injection** (`virtrtlabctl inject`) and UART emulation work without
+`CONFIG_IRQ_SIM`. Only AUTs that listen for GPIO edge events via
+`GPIO_V2_LINE_EVENT_*` will be affected (once that feature is implemented).
 
 ### Enabling CONFIG_IRQ_SIM — Debian/Ubuntu procedure
 

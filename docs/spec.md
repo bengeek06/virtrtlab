@@ -231,20 +231,28 @@ Full transport specification: [socket-api.md](socket-api.md).
 
 ## 5. AUT integration contract
 
-`virtrtlabctl up` emits a stable set of environment variables for the AUT to consume:
+`virtrtlabctl up` emits one block per device on stdout. Each block prints the
+resolved paths and the environment variables the AUT should use:
 
 | Variable | Example value | Description |
 |---|---|---|
-| `VIRTRTLAB_UART_TTY` | `ttyVIRTLAB0` | TTY device name (without `/dev/`) |
-| `VIRTRTLAB_UART_SOCK` | `/run/virtrtlab/uart0.sock` | Daemon socket path |
-| `VIRTRTLAB_GPIO_CHIP` | `/dev/gpiochip4` | GPIO chardev path |
-| `VIRTRTLAB_GPIO_SYSFS_BASE` | `496` | First global GPIO number (legacy ABI) |
+| `VIRTRTLAB_UART<N>` | `/dev/ttyVIRTLAB0` | Full TTY device path |
+| `VIRTRTLAB_GPIOCHIP<N>` | `/dev/gpiochip4` | GPIO character device path |
+| `VIRTRTLAB_GPIOBASE<N>` | `496` | First global GPIO number (legacy sysfs ABI; omitted if `CONFIG_GPIO_SYSFS` absent) |
+| `VIRTRTLAB_GPIOCTRL<N>` | `/sys/kernel/virtrtlab/devices/gpio0` | sysfs control directory |
 
 Usage in a harness:
 
 ```sh
-eval $(sudo virtrtlabctl up --uart 1 --gpio 1)
-# AUT can now use $VIRTRTLAB_UART_TTY, $VIRTRTLAB_GPIO_CHIP, …
+# Run up and capture the printed export lines
+sudo virtrtlabctl up --uart 1 --gpio 1
+# Then set in your shell:
+export VIRTRTLAB_UART0=/dev/ttyVIRTLAB0
+export VIRTRTLAB_GPIOCHIP0=/dev/gpiochip4
+export VIRTRTLAB_GPIOCTRL0=/sys/kernel/virtrtlab/devices/gpio0
+
+# Or use --json for machine-parseable output:
+contract=$(sudo virtrtlabctl --json up --uart 1 --gpio 1)
 ```
 
 ---
