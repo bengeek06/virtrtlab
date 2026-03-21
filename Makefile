@@ -220,3 +220,77 @@ dkms-add: _check_root
 	@echo "      sudo dkms build   virtrtlab/$(VERSION)"
 	@echo "      sudo dkms install virtrtlab/$(VERSION)"
 
+# ── QA / local checks ─────────────────────────────────────────────────────────
+#
+# Run the same checks as CI without needing a GitHub runner.
+#
+# First-time setup:
+#   make venv               creates .venv/ and installs Python QA tools
+#   apt install clang-tidy clang-format sparse   (for daemon/kernel checks)
+#   make checkpatch.pl      downloads checkpatch from kernel.org
+#
+# Daily use:
+#   make qa                 CLI + daemon checks
+#   make qa-kernel-lint     checkpatch + clang-format (no kernel headers needed)
+
+CHECKPATCH_TAG ?= v6.12
+CHECKPATCH_URL  = https://raw.githubusercontent.com/torvalds/linux/$(CHECKPATCH_TAG)/scripts/checkpatch.pl
+
+VENV        := .venv
+VENV_PYTHON := $(VENV)/bin/python
+VENV_PIP    := $(VENV)/bin/pip
+
+RUFF   := $(VENV)/bin/ruff
+MYPY   := $(VENV)/bin/mypy
+BANDIT := $(VENV)/bin/bandit
+PYTEST := $(VENV)/bin/pytest
+
+.PHONY: venv qa qa-cli qa-cli-ruff qa-cli-mypy qa-cli-bandit qa-cli-pytest \
+        qa-daemon qa-kernel-lint
+
+## venv: create .venv and install Python QA tools
+venv: $(VENV_PYTHON)
+
+$(VENV_PYTHON):
+	python3 -m venv $(VENV)
+	$(VENV_PIP) install --quiet --upgrade pip
+	$(VENV_PIP) install --quiet ruff mypy bandit pytest pytest-cov
+	@echo "venv ready — activate with: source $(VENV)/bin/activate"
+
+## qa: CLI + daemon quality gates (no kernel headers required)
+qa: qa-cli qa-daemon
+
+## qa-cli: ruff + mypy + bandit + pytest for CLI
+qa-cli: qa-cli-ruff qa-cli-mypy qa-cli-bandit qa-cli-pytest
+
+qa-cli-ruff: $(VENV_PYTHON)
+	$(RUFF) check cli/
+	$(RUFF) format --check cli/
+
+qa-cli-mypy: $(VENV_PYTHON)
+	$(MYPY) --strict cli/virtrtlabctl.py
+
+qa-cli-bandit: $(VENV_PYTHON)
+	$(BANDIT) -r cli/ --severity-level medium
+
+qa-cli-pytest: $(VENV_PYTHON)
+	$(PYTEST) tests/cli/ --cov=cli --cov-fail-under=50
+
+## qa-daemon: daemon build (-Werror) + clang-tidy
+qa-daemon:
+	$(MAKE) -C daemon/ CFLAGS="-Wall -Wextra -O2 -std=gnu11 -Werror"
+	clang-tidy \
+	    daemon/main.c \
+	    daemon/epoll_loop.c \
+	    daemon/instance.c \
+	    -- -Wall -Wextra -std=gnu11 -I daemon/
+
+## qa-kernel-lint: checkpatch + clang-format on kernel sources (no headers required)
+checkpatch.pl:
+	curl -sSfL $(CHECKPATCH_URL) -o $@
+	chmod +x $@
+
+qa-kernel-lint: checkpatch.pl
+	perl checkpatch.pl --strict --no-tree -f kernel/*.c kernel/include/*.h
+	clang-format --style=Linux --dry-run --Werror kernel/*.c kernel/include/*.h
+

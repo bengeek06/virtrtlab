@@ -12,6 +12,7 @@ import sys
 import time
 import tomllib
 from pathlib import Path
+from typing import Any, cast
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -67,8 +68,8 @@ def _run_cmd(
     check: bool = True,
     capture: bool = False,
     exit_code: int = 1,
-) -> subprocess.CompletedProcess:
-    kwargs: dict = {}
+) -> subprocess.CompletedProcess[str]:
+    kwargs: dict[str, Any] = {}
     if capture:
         kwargs["stdout"] = subprocess.PIPE
         kwargs["stderr"] = subprocess.PIPE
@@ -82,7 +83,7 @@ def _run_cmd(
         ) from exc
 
 
-def _emit(data: "dict | list | str", json_flag: bool) -> None:
+def _emit(data: "dict[str, Any] | list[Any] | str", json_flag: bool) -> None:
     if json_flag:
         print(json.dumps(data if not isinstance(data, str) else {"message": data}))
     else:
@@ -148,7 +149,7 @@ def _find_ko(module_name: str, module_dir: str | None = None) -> Path:
     raise VirtrtlabError(f"{filename} not found (searched: {searched})", exit_code=1)
 
 
-def _resolve_profile(args: argparse.Namespace) -> dict:
+def _resolve_profile(args: argparse.Namespace) -> dict[str, Any]:
     """Resolve a lab profile from TOML file + inline overrides.
 
     Returns: {'devices': [{'type': str, 'count': int}, ...],
@@ -156,7 +157,7 @@ def _resolve_profile(args: argparse.Namespace) -> dict:
                'build':   {'module_dir': str | None, ...}}
     Raises VirtrtlabError(2) on parse/validation errors.
     """
-    profile: dict = {"devices": [], "bus": {}, "build": {}}
+    profile: dict[str, Any] = {"devices": [], "bus": {}, "build": {}}
 
     # Locate TOML file
     toml_path: Path | None = None
@@ -360,7 +361,7 @@ def _poll_sockets(sock_paths: list[Path], timeout: float = 5.0) -> None:
         time.sleep(0.1)
 
 
-def _expected_sockets(profile: dict) -> list[Path]:
+def _expected_sockets(profile: dict[str, Any]) -> list[Path]:
     """Return expected socket paths for UART devices in the profile."""
     run = Path(RUN_DIR)
     return [
@@ -371,7 +372,7 @@ def _expected_sockets(profile: dict) -> list[Path]:
     ]
 
 
-def _modules_load_order(profile: dict) -> list[str]:
+def _modules_load_order(profile: dict[str, Any]) -> list[str]:
     """Return module names in load order: core first, then device modules."""
     names: list[str] = ["virtrtlab_core"]
     for dev in profile["devices"]:
@@ -381,7 +382,7 @@ def _modules_load_order(profile: dict) -> list[str]:
     return names
 
 
-def _resolve_aut_contract(profile: dict, run_dir: str = RUN_DIR) -> list[dict]:
+def _resolve_aut_contract(profile: dict[str, Any], run_dir: str = RUN_DIR) -> list[dict[str, Any]]:
     """Resolve the AUT integration contract for every device in the profile.
 
     For UART devices the paths are derived deterministically from the instance
@@ -396,7 +397,7 @@ def _resolve_aut_contract(profile: dict, run_dir: str = RUN_DIR) -> list[dict]:
 
     Returns a list of device contract dicts in profile declaration order.
     """
-    contract: list[dict] = []
+    contract: list[dict[str, Any]] = []
     uart_idx = 0
     gpio_idx = 0
 
@@ -446,7 +447,7 @@ def _resolve_aut_contract(profile: dict, run_dir: str = RUN_DIR) -> list[dict]:
                         exit_code=4,
                     )
 
-                entry: dict = {
+                entry: dict[str, Any] = {
                     "name": f"gpio{idx}",
                     "type": "gpio",
                     "chip_path": chip_path,
@@ -483,7 +484,7 @@ def _resolve_aut_contract(profile: dict, run_dir: str = RUN_DIR) -> list[dict]:
     return contract
 
 
-def _print_contract_human(contract: list[dict]) -> None:
+def _print_contract_human(contract: list[dict[str, Any]]) -> None:
     """Print the AUT integration contract in the spec-mandated human format.
 
     Env var emission order matches device-contract.md exactly:
@@ -653,7 +654,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     # Daemon
     pid = _daemon_pid()
-    daemon_info: dict = (
+    daemon_info: dict[str, Any] = (
         {"state": "running", "pid": pid} if pid else {"state": "stopped", "pid": None}
     )
 
@@ -683,9 +684,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("daemon:")
         if pid:
             print(f"  pid    {pid}")
-            print(f"  state  running")
+            print("  state  running")
         else:
-            print(f"  state  stopped")
+            print("  state  stopped")
         print()
         print("sockets:")
         for sock in sockets:
@@ -1027,7 +1028,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     try:
-        return args.func(args)
+        return cast(int, args.func(args))
     except VirtrtlabError as exc:
         if getattr(args, "json", False):
             print(json.dumps({"error": str(exc), "code": exc.exit_code}))
