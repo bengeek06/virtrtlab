@@ -462,6 +462,34 @@ See `tests/README.md` for the repository-level test layout.
 
 ---
 
+## Getting Started — Fault Injection Examples
+
+The [`examples/`](examples/) directory contains three ready-to-run scenarios
+that demonstrate the fault-injection workflow from end to end.  Each example
+ships an AUT (application-under-test) and a companion harness:
+
+| Example | Bug | Fault |
+|---|---|---|
+| [`aut_uart_timeout`](examples/aut_uart_timeout/) | `read()` with no timeout | Harness drops 1 byte → AUT blocks forever |
+| [`aut_gpio_polarity`](examples/aut_gpio_polarity/) | Wrong edge polarity (RISING vs FALLING) | Harness drives falling edge → AUT misses event |
+| [`aut_uart_statemachine`](examples/aut_uart_statemachine/) | State machine without RESET state | Harness injects extra byte → AUT enters bad state |
+
+```sh
+# Build the AUTs (host libc only, no kernel source needed):
+make -C examples
+
+# Run the baseline (AUT passes without fault injection):
+examples/aut_uart_timeout/harness.sh --baseline   # exit 0
+
+# Run the fault-injection scenario (AUT fails, bug is triggered):
+examples/aut_uart_timeout/harness.sh              # exit non-zero
+```
+
+See [`examples/README.md`](examples/README.md) for full prerequisites and
+per-example details.
+
+---
+
 ## License
 
 Kernel modules in `kernel/` are licensed under [GPL-2.0-only](LICENSE).
