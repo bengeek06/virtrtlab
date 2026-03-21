@@ -260,6 +260,9 @@ jobs:
       - name: Install test dependencies
         run: pip install pytest
 
+      - name: Ensure virtrtlab group exists
+        run: sudo groupadd -f virtrtlab
+
       - name: Run tests
         run: |
           mkdir -p test-artifacts
