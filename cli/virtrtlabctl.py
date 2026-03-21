@@ -366,16 +366,18 @@ def _modules_load_order(profile: dict) -> list[str]:
     return names
 
 
-def _resolve_aut_contract(profile: dict) -> list[dict]:
+def _resolve_aut_contract(profile: dict, run_dir: str = RUN_DIR) -> list[dict]:
     """Resolve the AUT integration contract for every device in the profile.
 
     For UART devices the paths are derived deterministically from the instance
     index (no sysfs read needed for the TTY path).
 
-    For GPIO devices, chip_path and sysfs_base are read from sysfs.  If
-    sysfs_base is absent (host kernel built without CONFIG_GPIO_SYSFS), the key
-    and its VIRTRTLAB_GPIOBASE<N> env var are silently omitted and a warning is
-    printed to stderr.
+    For GPIO devices, chip_path is read from sysfs; VirtrtlabError(exit_code=4)
+    is raised if it is missing or empty (the module is not loaded or the contract
+    would violate the device-contract "empty = fail fast" rule).  If sysfs_base
+    is absent (host kernel built without CONFIG_GPIO_SYSFS), the key and its
+    VIRTRTLAB_GPIOBASE<N> env var are omitted; a warning is emitted on stderr
+    and stored in entry["warnings"] for JSON consumers.
 
     Returns a list of device contract dicts in profile declaration order.
     """
@@ -396,7 +398,7 @@ def _resolve_aut_contract(profile: dict) -> list[dict]:
                     "type": "uart",
                     "aut_path": aut_path,
                     "wire_path": f"/dev/virtrtlab-wire{idx}",
-                    "socket_path": f"{RUN_DIR}/uart{idx}.sock",
+                    "socket_path": f"{run_dir}/uart{idx}.sock",
                     "env": {
                         f"VIRTRTLAB_UART{idx}": aut_path,
                     },
@@ -410,12 +412,24 @@ def _resolve_aut_contract(profile: dict) -> list[dict]:
                 chip_path_file = Path(ctrl) / "chip_path"
                 sysfs_base_file = Path(ctrl) / "sysfs_base"
 
-                chip_path = ""
-                if chip_path_file.exists():
-                    try:
-                        chip_path = chip_path_file.read_text().strip()
-                    except OSError:
-                        pass
+                if not chip_path_file.exists():
+                    raise VirtrtlabError(
+                        f"gpio{idx}: chip_path not found in sysfs "
+                        f"(is virtrtlab_gpio loaded?)",
+                        exit_code=4,
+                    )
+                try:
+                    chip_path = chip_path_file.read_text().strip()
+                except OSError as exc:
+                    raise VirtrtlabError(
+                        f"gpio{idx}: cannot read chip_path: {exc}",
+                        exit_code=4,
+                    ) from exc
+                if not chip_path:
+                    raise VirtrtlabError(
+                        f"gpio{idx}: chip_path is empty in sysfs",
+                        exit_code=4,
+                    )
 
                 entry: dict = {
                     "name": f"gpio{idx}",
@@ -434,22 +448,44 @@ def _resolve_aut_contract(profile: dict) -> list[dict]:
                         entry["sysfs_base"] = base
                         entry["env"][f"VIRTRTLAB_GPIOBASE{idx}"] = str(base)
                     except (OSError, ValueError):
-                        print(
-                            f"warning: gpio{idx}: sysfs_base unreadable, "
-                            f"omitting VIRTRTLAB_GPIOBASE{idx}",
-                            file=sys.stderr,
+                        warn_msg = (
+                            f"gpio{idx}: sysfs_base unreadable, "
+                            f"omitting VIRTRTLAB_GPIOBASE{idx}"
                         )
+                        print(f"warning: {warn_msg}", file=sys.stderr)
+                        entry.setdefault("warnings", []).append(warn_msg)
                 else:
-                    print(
-                        f"warning: gpio{idx}: sysfs_base not available "
-                        f"(legacy /sys/class/gpio not supported by host kernel)",
-                        file=sys.stderr,
+                    warn_msg = (
+                        f"legacy sysfs GPIO ABI unavailable; "
+                        f"VIRTRTLAB_GPIOBASE{idx} omitted"
                     )
+                    print(f"warning: gpio{idx}: {warn_msg}", file=sys.stderr)
+                    entry.setdefault("warnings", []).append(warn_msg)
 
                 contract.append(entry)
             gpio_idx += count
 
     return contract
+
+
+def _print_contract_human(contract: list[dict]) -> None:
+    """Print the AUT integration contract in the spec-mandated human format."""
+    for entry in contract:
+        name = entry["name"]
+        etype = entry["type"]
+        print(f"[ok] {name} loaded")
+        if etype == "uart":
+            print(f"     tty: {entry['aut_path']}")
+        elif etype == "gpio":
+            print(f"     gpiochip: {entry['chip_path']}")
+            if "sysfs_base" in entry:
+                print(f"     sysfs base: {entry['sysfs_base']}")
+            print(f"     control: {entry['control_path']}")
+        for var, val in entry["env"].items():
+            print(f"     export {var}={val}")
+        for warning in entry.get("warnings", []):
+            print(f"     [warn] {warning}")
+        print()
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +505,11 @@ def cmd_up(args: argparse.Namespace) -> int:
         and _daemon_pid() is not None
     ):
         print("warning: lab already up (modules loaded, daemon running)", file=sys.stderr)
+        contract = _resolve_aut_contract(profile)
+        if args.json:
+            _emit({"devices": contract}, True)
+        else:
+            _print_contract_human(contract)
         return 0
 
     _ensure_run_dir(no_sudo)
@@ -530,9 +571,7 @@ def cmd_up(args: argparse.Namespace) -> int:
     if args.json:
         _emit({"devices": contract}, True)
     else:
-        for entry in contract:
-            for var, val in entry["env"].items():
-                print(f"export {var}={val}")
+        _print_contract_human(contract)
     return 0
 
 
