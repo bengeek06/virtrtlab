@@ -27,6 +27,8 @@ __pycache__/
 
 # Tests
 .pytest_cache/
+.coverage
+checkpatch.pl
 
 # OS/editor
 .DS_Store

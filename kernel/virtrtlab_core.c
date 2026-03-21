@@ -28,7 +28,7 @@
  * Bus type — visible in /sys/bus/virtrtlab/
  */
 
-const struct bus_type virtrtlab_bus_type = {
+struct bus_type virtrtlab_bus_type = {
 	.name = "virtrtlab",
 };
 EXPORT_SYMBOL_GPL(virtrtlab_bus_type);

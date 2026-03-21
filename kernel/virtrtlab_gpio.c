@@ -19,6 +19,7 @@
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/workqueue.h>
+#include "virtrtlab_compat.h"
 #include "virtrtlab_core.h"
 
 /* -------------------------------------------------------------------------
@@ -156,7 +157,8 @@ static int virtrtlab_gpio_get(struct gpio_chip *gc, unsigned int offset)
 	return val;
 }
 
-static int virtrtlab_gpio_set(struct gpio_chip *gc, unsigned int offset, int value)
+static void virtrtlab_gpio_set_common(struct gpio_chip *gc,
+				      unsigned int offset, int value)
 {
 	struct virtrtlab_gpio_dev *gdev = gpiochip_get_data(gc);
 
@@ -164,8 +166,20 @@ static int virtrtlab_gpio_set(struct gpio_chip *gc, unsigned int offset, int val
 	if (gdev->lines[offset].is_output)
 		gdev->lines[offset].value = value ? 1 : 0;
 	mutex_unlock(&gdev->lock);
+}
+
+#ifdef VIRTRTLAB_HAVE_INT_GPIO_SET
+static int virtrtlab_gpio_set(struct gpio_chip *gc, unsigned int offset, int value)
+{
+	virtrtlab_gpio_set_common(gc, offset, value);
 	return 0;
 }
+#else
+static void virtrtlab_gpio_set(struct gpio_chip *gc, unsigned int offset, int value)
+{
+	virtrtlab_gpio_set_common(gc, offset, value);
+}
+#endif
 
 static int virtrtlab_gpio_get_multiple(struct gpio_chip *gc,
 				       unsigned long *mask, unsigned long *bits)
@@ -182,8 +196,9 @@ static int virtrtlab_gpio_get_multiple(struct gpio_chip *gc,
 	return 0;
 }
 
-static int virtrtlab_gpio_set_multiple(struct gpio_chip *gc,
-				       unsigned long *mask, unsigned long *bits)
+static void virtrtlab_gpio_set_multiple_common(struct gpio_chip *gc,
+					       unsigned long *mask,
+					       unsigned long *bits)
 {
 	struct virtrtlab_gpio_dev *gdev = gpiochip_get_data(gc);
 	unsigned int i;
@@ -194,8 +209,24 @@ static int virtrtlab_gpio_set_multiple(struct gpio_chip *gc,
 			gdev->lines[i].value = test_bit(i, bits) ? 1 : 0;
 	}
 	mutex_unlock(&gdev->lock);
+}
+
+#ifdef VIRTRTLAB_HAVE_INT_GPIO_SET
+static int
+virtrtlab_gpio_set_multiple(struct gpio_chip *gc, unsigned long *mask,
+			    unsigned long *bits)
+{
+	virtrtlab_gpio_set_multiple_common(gc, mask, bits);
 	return 0;
 }
+#else
+static void
+virtrtlab_gpio_set_multiple(struct gpio_chip *gc, unsigned long *mask,
+			    unsigned long *bits)
+{
+	virtrtlab_gpio_set_multiple_common(gc, mask, bits);
+}
+#endif
 
 static int virtrtlab_gpio_get_direction(struct gpio_chip *gc, unsigned int offset)
 {
@@ -841,6 +872,27 @@ static void virtrtlab_gpio_dev_release(struct device *dev)
 	kfree(gdev);
 }
 
+static void virtrtlab_gpio_set_chip_path(struct virtrtlab_gpio_dev *gdev)
+{
+#if KERNEL_VERSION(6, 19, 0) <= LINUX_VERSION_CODE
+	struct device *chip_dev;
+
+	chip_dev = gpio_device_to_device(gdev->gc.gpiodev);
+	if (chip_dev) {
+		snprintf(gdev->chip_path, sizeof(gdev->chip_path),
+			 "/dev/%s", dev_name(chip_dev));
+		return;
+	}
+#endif
+
+	/*
+	 * Older kernels do not expose a stable gpiochip char-device getter.
+	 * Keep the previous hint format as a fallback for compatibility.
+	 */
+	snprintf(gdev->chip_path, sizeof(gdev->chip_path),
+		 "/dev/gpiochip%d", gdev->index);
+}
+
 static int __init virtrtlab_gpio_init(void)
 {
 	int n, i, ret;
@@ -871,9 +923,8 @@ static int __init virtrtlab_gpio_init(void)
 		for (i = 0; i < VIRTRTLAB_GPIO_LINES; i++) {
 			gdev->lines[i].parent = gdev;
 			gdev->lines[i].index  = i;
-			hrtimer_setup(&gdev->lines[i].delay_timer,
-				      virtrtlab_gpio_timer_cb,
-				      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+			virtrtlab_hrtimer_init_compat(&gdev->lines[i].delay_timer,
+						      virtrtlab_gpio_timer_cb);
 			INIT_WORK(&gdev->lines[i].apply_work,
 				  virtrtlab_gpio_apply_work_fn);
 		}
@@ -919,18 +970,7 @@ static int __init virtrtlab_gpio_init(void)
 			goto err_unwind;
 		}
 
-		/*
-		 * gc.base is the first GPIO number in the system GPIO numberspace,
-		 * not the gpiochip character device index.
-		 * gpio_device_to_device(gc.gpiodev) returns the gpio_device's
-		 * struct device whose kobject name is "gpiochipN" — the same N
-		 * that appears in /dev/gpiochipN.  gc.gpiodev is a public field
-		 * of struct gpio_chip (driver.h); gpio_device_to_device() is the
-		 * public API to dereference it without touching the opaque internals
-		 * of struct gpio_device.
-		 */
-		snprintf(gdev->chip_path, sizeof(gdev->chip_path), "/dev/%s",
-			 dev_name(gpio_device_to_device(gdev->gc.gpiodev)));
+		virtrtlab_gpio_set_chip_path(gdev);
 
 		ret = virtrtlab_bus_register_notifier(&gdev->nb);
 		if (ret) {

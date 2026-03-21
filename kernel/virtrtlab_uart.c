@@ -33,6 +33,7 @@
 #include <linux/tty_flip.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
+#include "virtrtlab_compat.h"
 #include "virtrtlab_core.h"
 
 /* latency_ns / jitter_ns ceiling: 10 s as per spec */
@@ -734,8 +735,8 @@ static u64 virtrtlab_uart_byte_ns(u32 baud)
 	return div64_u64(10ULL * NSEC_PER_SEC, (u64)baud);
 }
 
-static ssize_t virtrtlab_tty_write(struct tty_struct *tty, const u8 *buf,
-				   size_t count)
+static ssize_t virtrtlab_tty_write_common(struct tty_struct *tty,
+					  const u8 *buf, size_t count)
 {
 	struct virtrtlab_uart_dev *udev = tty->driver_data;
 	unsigned int copied;
@@ -771,6 +772,28 @@ static ssize_t virtrtlab_tty_write(struct tty_struct *tty, const u8 *buf,
 	}
 	return copied;
 }
+
+#ifdef VIRTRTLAB_HAVE_SSIZE_T_TTY_WRITE
+static ssize_t virtrtlab_tty_write(struct tty_struct *tty, const u8 *buf,
+				   size_t count)
+{
+	return virtrtlab_tty_write_common(tty, buf, count);
+}
+#else
+static int virtrtlab_tty_write(struct tty_struct *tty,
+			       const unsigned char *buf, int count)
+{
+	ssize_t ret;
+
+	if (count <= 0)
+		return 0;
+
+	ret = virtrtlab_tty_write_common(tty, buf, (size_t)count);
+	if (ret < 0)
+		return (int)ret;
+	return (int)ret;
+}
+#endif
 
 static unsigned int virtrtlab_tty_write_room(struct tty_struct *tty)
 {
@@ -1318,8 +1341,8 @@ static int __init virtrtlab_uart_init(void)
 		udev->stopbits = 1;
 
 		/* fault injection engine placeholders */
-		hrtimer_setup(&udev->tx_timer, virtrtlab_uart_tx_timer_cb,
-			      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+		virtrtlab_hrtimer_init_compat(&udev->tx_timer,
+					      virtrtlab_uart_tx_timer_cb);
 		INIT_WORK(&udev->tx_work, virtrtlab_uart_tx_work_fn);
 
 		udev->port.ops = &virtrtlab_port_ops;
