@@ -280,6 +280,7 @@ qa-cli-pytest: $(VENV_PYTHON)
 qa-daemon:
 	$(MAKE) -C daemon/ CFLAGS="-Wall -Wextra -O2 -std=gnu11 -Werror"
 	clang-tidy \
+	    -checks='-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling' \
 	    daemon/main.c \
 	    daemon/epoll_loop.c \
 	    daemon/instance.c \

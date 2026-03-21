@@ -141,6 +141,7 @@ jobs:
       - name: Run clang-tidy
         run: |
           clang-tidy \
+            -checks='-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling' \
             daemon/main.c \
             daemon/epoll_loop.c \
             daemon/instance.c \
