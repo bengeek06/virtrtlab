@@ -51,12 +51,12 @@ fi
 # ---------------------------------------------------------------------------
 # Load the UART device and export env vars.
 # ---------------------------------------------------------------------------
-while IFS= read -r line; do
-    case "$line" in VIRTRTLAB_*) export "$line" ;; esac
-done < <(virtrtlabctl up uart0 2>/dev/null)
+while IFS= read -r kv; do
+    export "$kv"
+done < <(virtrtlabctl up --uart 1 2>/dev/null | grep -oE 'VIRTRTLAB_[A-Z0-9]+=[^ ]+')
 
 if [[ -z "${VIRTRTLAB_UART0:-}" ]]; then
-    echo "FAIL: virtrtlabctl up uart0 did not export VIRTRTLAB_UART0"
+    echo "FAIL: virtrtlabctl up --uart 1 did not export VIRTRTLAB_UART0"
     exit 1
 fi
 

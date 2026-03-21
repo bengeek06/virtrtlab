@@ -49,12 +49,12 @@ fi
 # ---------------------------------------------------------------------------
 # Load the GPIO device and export env vars.
 # ---------------------------------------------------------------------------
-while IFS= read -r line; do
-    case "$line" in VIRTRTLAB_*) export "$line" ;; esac
-done < <(virtrtlabctl up gpio0 2>/dev/null)
+while IFS= read -r kv; do
+    export "$kv"
+done < <(virtrtlabctl up --gpio 1 2>/dev/null | grep -oE 'VIRTRTLAB_[A-Z0-9]+=[^ ]+')
 
 if [[ -z "${VIRTRTLAB_GPIOCHIP0:-}" ]]; then
-    echo "FAIL: virtrtlabctl up gpio0 did not export VIRTRTLAB_GPIOCHIP0"
+    echo "FAIL: virtrtlabctl up --gpio 1 did not export VIRTRTLAB_GPIOCHIP0"
     exit 1
 fi
 

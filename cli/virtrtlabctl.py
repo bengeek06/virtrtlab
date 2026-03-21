@@ -6,6 +6,7 @@
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -18,11 +19,16 @@ from pathlib import Path
 
 SYSFS_ROOT = "/sys/kernel/virtrtlab"
 RUN_DIR = "/run/virtrtlab"
-# Resolved at import time: $VIRTRTLABD env var → repo-relative daemon/virtrtlabd → PATH
+# Resolved at import time:
+#   1. $VIRTRTLABD env var (explicit override)
+#   2. repo-relative daemon/virtrtlabd (development layout)
+#   3. virtrtlabd on PATH (installed layout)
 _SCRIPT_DIR = Path(__file__).resolve().parent
-DAEMON_BIN = os.environ.get(
+_DAEMON_RELATIVE = _SCRIPT_DIR.parent / "daemon" / "virtrtlabd"
+DAEMON_BIN: str = os.environ.get(
     "VIRTRTLABD",
-    str(_SCRIPT_DIR.parent / "daemon" / "virtrtlabd"),
+    str(_DAEMON_RELATIVE) if _DAEMON_RELATIVE.exists()
+    else (shutil.which("virtrtlabd") or "virtrtlabd"),
 )
 KNOWN_MODULES = ["virtrtlab_core", "virtrtlab_uart", "virtrtlab_gpio"]
 
@@ -258,14 +264,20 @@ def _daemon_pid(run_dir: str = RUN_DIR) -> int | None:
         return None
     proc_dir = Path(f"/proc/{pid}")
     if not proc_dir.exists():
-        pid_file.unlink(missing_ok=True)
+        try:
+            pid_file.unlink(missing_ok=True)
+        except PermissionError:
+            pass  # root-owned pid file; stale but cannot remove
         return None
     # Validate the process is actually virtrtlabd (guard against PID reuse)
     comm_path = proc_dir / "comm"
     try:
         comm = comm_path.read_text().strip()
         if comm != "virtrtlabd":
-            pid_file.unlink(missing_ok=True)
+            try:
+                pid_file.unlink(missing_ok=True)
+            except PermissionError:
+                pass  # root-owned pid file; stale but cannot remove
             return None
     except OSError:
         pass  # /proc/<pid>/comm unreadable → assume still ours
