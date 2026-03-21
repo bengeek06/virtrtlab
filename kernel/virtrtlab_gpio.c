@@ -18,8 +18,8 @@
 #include <linux/printk.h>
 #include <linux/slab.h>
 #include <linux/types.h>
-#include <linux/version.h>
 #include <linux/workqueue.h>
+#include "virtrtlab_compat.h"
 #include "virtrtlab_core.h"
 
 /* -------------------------------------------------------------------------
@@ -35,17 +35,6 @@
  */
 #define VIRTRTLAB_GPIO_MAX_LATENCY_NS	10000000000ULL
 #define VIRTRTLAB_GPIO_MAX_PPM		1000000U
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
-#define virtrtlab_hrtimer_init(_timer, _fn) \
-	hrtimer_setup((_timer), (_fn), CLOCK_MONOTONIC, HRTIMER_MODE_REL)
-#else
-#define virtrtlab_hrtimer_init(_timer, _fn) \
-	do { \
-		hrtimer_init((_timer), CLOCK_MONOTONIC, HRTIMER_MODE_REL); \
-		(_timer)->function = (_fn); \
-	} while (0)
-#endif
 
 static unsigned int num_gpio_devs = 1;
 module_param(num_gpio_devs, uint, 0444);
@@ -179,7 +168,7 @@ static void virtrtlab_gpio_set_common(struct gpio_chip *gc,
 	mutex_unlock(&gdev->lock);
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+#ifdef VIRTRTLAB_HAVE_INT_GPIO_SET
 static int virtrtlab_gpio_set(struct gpio_chip *gc, unsigned int offset, int value)
 {
 	virtrtlab_gpio_set_common(gc, offset, value);
@@ -220,19 +209,20 @@ static void virtrtlab_gpio_set_multiple_common(struct gpio_chip *gc,
 			gdev->lines[i].value = test_bit(i, bits) ? 1 : 0;
 	}
 	mutex_unlock(&gdev->lock);
-
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
-static int virtrtlab_gpio_set_multiple(struct gpio_chip *gc,
-				       unsigned long *mask, unsigned long *bits)
+#ifdef VIRTRTLAB_HAVE_INT_GPIO_SET
+static int
+virtrtlab_gpio_set_multiple(struct gpio_chip *gc, unsigned long *mask,
+			    unsigned long *bits)
 {
 	virtrtlab_gpio_set_multiple_common(gc, mask, bits);
 	return 0;
 }
 #else
-static void virtrtlab_gpio_set_multiple(struct gpio_chip *gc,
-				       unsigned long *mask, unsigned long *bits)
+static void
+virtrtlab_gpio_set_multiple(struct gpio_chip *gc, unsigned long *mask,
+			    unsigned long *bits)
 {
 	virtrtlab_gpio_set_multiple_common(gc, mask, bits);
 }
@@ -882,6 +872,27 @@ static void virtrtlab_gpio_dev_release(struct device *dev)
 	kfree(gdev);
 }
 
+static void virtrtlab_gpio_set_chip_path(struct virtrtlab_gpio_dev *gdev)
+{
+#if KERNEL_VERSION(6, 19, 0) <= LINUX_VERSION_CODE
+	struct device *chip_dev;
+
+	chip_dev = gpio_device_to_device(gdev->gc.gpiodev);
+	if (chip_dev) {
+		snprintf(gdev->chip_path, sizeof(gdev->chip_path),
+			 "/dev/%s", dev_name(chip_dev));
+		return;
+	}
+#endif
+
+	/*
+	 * Older kernels do not expose a stable gpiochip char-device getter.
+	 * Keep the previous hint format as a fallback for compatibility.
+	 */
+	snprintf(gdev->chip_path, sizeof(gdev->chip_path),
+		 "/dev/gpiochip%d", gdev->index);
+}
+
 static int __init virtrtlab_gpio_init(void)
 {
 	int n, i, ret;
@@ -912,8 +923,8 @@ static int __init virtrtlab_gpio_init(void)
 		for (i = 0; i < VIRTRTLAB_GPIO_LINES; i++) {
 			gdev->lines[i].parent = gdev;
 			gdev->lines[i].index  = i;
-			virtrtlab_hrtimer_init(&gdev->lines[i].delay_timer,
-					      virtrtlab_gpio_timer_cb);
+			virtrtlab_hrtimer_init_compat(&gdev->lines[i].delay_timer,
+						      virtrtlab_gpio_timer_cb);
 			INIT_WORK(&gdev->lines[i].apply_work,
 				  virtrtlab_gpio_apply_work_fn);
 		}
@@ -959,12 +970,7 @@ static int __init virtrtlab_gpio_init(void)
 			goto err_unwind;
 		}
 
-		/*
-		 * Keep a stable path hint without relying on gpio_device internals,
-		 * which are not exposed uniformly across all 6.x headers.
-		 */
-		snprintf(gdev->chip_path, sizeof(gdev->chip_path),
-			 "/dev/gpiochip%d", n);
+		virtrtlab_gpio_set_chip_path(gdev);
 
 		ret = virtrtlab_bus_register_notifier(&gdev->nb);
 		if (ret) {

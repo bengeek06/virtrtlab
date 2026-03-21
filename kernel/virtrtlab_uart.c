@@ -31,9 +31,9 @@
 #include <linux/tty.h>
 #include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
-#include <linux/version.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
+#include "virtrtlab_compat.h"
 #include "virtrtlab_core.h"
 
 /* latency_ns / jitter_ns ceiling: 10 s as per spec */
@@ -58,17 +58,6 @@
  * baud=38400 matches tty_std_termios speed B38400.
  */
 #define VIRTRTLAB_UART_DEFAULT_BAUD	38400U
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
-#define virtrtlab_hrtimer_init(_timer, _fn) \
-	hrtimer_setup((_timer), (_fn), CLOCK_MONOTONIC, HRTIMER_MODE_REL)
-#else
-#define virtrtlab_hrtimer_init(_timer, _fn) \
-	do { \
-		hrtimer_init((_timer), CLOCK_MONOTONIC, HRTIMER_MODE_REL); \
-		(_timer)->function = (_fn); \
-	} while (0)
-#endif
 
 /*
  * Per-device state — allocated in init, freed via dev->release().
@@ -784,19 +773,22 @@ static ssize_t virtrtlab_tty_write_common(struct tty_struct *tty,
 	return copied;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+#ifdef VIRTRTLAB_HAVE_SSIZE_T_TTY_WRITE
 static ssize_t virtrtlab_tty_write(struct tty_struct *tty, const u8 *buf,
-			   size_t count)
+				   size_t count)
 {
 	return virtrtlab_tty_write_common(tty, buf, count);
 }
 #else
 static int virtrtlab_tty_write(struct tty_struct *tty,
-			      const unsigned char *buf, int count)
+			       const unsigned char *buf, int count)
 {
 	ssize_t ret;
 
-	ret = virtrtlab_tty_write_common(tty, buf, count);
+	if (count <= 0)
+		return 0;
+
+	ret = virtrtlab_tty_write_common(tty, buf, (size_t)count);
 	if (ret < 0)
 		return (int)ret;
 	return (int)ret;
@@ -1349,8 +1341,8 @@ static int __init virtrtlab_uart_init(void)
 		udev->stopbits = 1;
 
 		/* fault injection engine placeholders */
-		virtrtlab_hrtimer_init(&udev->tx_timer,
-				      virtrtlab_uart_tx_timer_cb);
+		virtrtlab_hrtimer_init_compat(&udev->tx_timer,
+					      virtrtlab_uart_tx_timer_cb);
 		INIT_WORK(&udev->tx_work, virtrtlab_uart_tx_work_fn);
 
 		udev->port.ops = &virtrtlab_port_ops;

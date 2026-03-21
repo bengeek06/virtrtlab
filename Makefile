@@ -297,6 +297,6 @@ KERNEL_LINT_SRCS := $(filter-out $(wildcard kernel/*.mod.c),$(wildcard kernel/*.
 
 qa-kernel-lint: checkpatch.pl
 	perl checkpatch.pl --strict --no-tree \
-	    --ignore LINUX_VERSION_CODE,CONSTANT_COMPARISON,MACRO_ARG_REUSE,PARENTHESIS_ALIGNMENT,BRACES \
+	    --ignore LINUX_VERSION_CODE \
 	    -f $(KERNEL_LINT_SRCS)
 
