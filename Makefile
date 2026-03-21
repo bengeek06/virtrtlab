@@ -12,6 +12,10 @@
 #   install-dev  — install + targeted sudoers for CI/dev (requires root)
 #   uninstall    — remove all installed files (requires root)
 #   dkms-add     — register source tree with DKMS (requires root)
+#   dkms-deb     — build .deb packages (DKMS mkdeb if available, else fallback)
+#   deb-dkms     — alias for dkms-deb
+#   deb-release-local — build release-style .deb locally via scripts/build_deb_package.sh
+#   deb          — alias for deb-release-local
 
 VERSION  := 0.1.0
 KDIR     ?= /lib/modules/$(shell uname -r)/build
@@ -24,8 +28,9 @@ UDEVDIR  := /lib/udev/rules.d
 SYSDDIR  := /lib/systemd/system
 SUDOERS  := /etc/sudoers.d
 DKMSRC   := /usr/src/virtrtlab-$(VERSION)
+DEBOUT   := dist
 
-.PHONY: all clean check install install-dev uninstall dkms-add
+.PHONY: all clean check install install-dev uninstall dkms-add dkms-deb deb-dkms deb-release-local deb
 
 # ── build ─────────────────────────────────────────────────────────────────────
 
@@ -219,6 +224,96 @@ dkms-add: _check_root
 	@echo "    Build and install:"
 	@echo "      sudo dkms build   virtrtlab/$(VERSION)"
 	@echo "      sudo dkms install virtrtlab/$(VERSION)"
+
+dkms-deb: _check_root
+	@DKMS_BIN=""; \
+	if command -v dkms >/dev/null 2>&1; then \
+		DKMS_BIN=$$(command -v dkms); \
+	elif [ -x /usr/sbin/dkms ]; then \
+		DKMS_BIN=/usr/sbin/dkms; \
+	elif [ -x /sbin/dkms ]; then \
+		DKMS_BIN=/sbin/dkms; \
+	fi; \
+	[ -n "$$DKMS_BIN" ] || { \
+		echo "[FAIL] dkms not installed — sudo apt install dkms"; \
+		exit 1; \
+	}; \
+	command -v dpkg-deb >/dev/null 2>&1 || { \
+		echo "[FAIL] dpkg-deb not found — install dpkg-dev"; \
+		exit 1; \
+	};
+	@echo "=== Building Debian packages via DKMS for virtrtlab $(VERSION) ==="
+	$(MAKE) dkms-add
+	@set -e; \
+	DKMS_BIN=""; \
+	if command -v dkms >/dev/null 2>&1; then \
+		DKMS_BIN=$$(command -v dkms); \
+	elif [ -x /usr/sbin/dkms ]; then \
+		DKMS_BIN=/usr/sbin/dkms; \
+	elif [ -x /sbin/dkms ]; then \
+		DKMS_BIN=/sbin/dkms; \
+	fi; \
+	$$DKMS_BIN build virtrtlab/$(VERSION); \
+	mkdir -p $(DEBOUT); \
+	if $$DKMS_BIN --help 2>&1 | grep -Eq '(^|[[:space:]])mkdeb([[:space:]]|$$)'; then \
+		echo "=== Using dkms mkdeb ==="; \
+		$$DKMS_BIN mkdeb virtrtlab/$(VERSION); \
+		find /var/lib/dkms/virtrtlab/$(VERSION) -type f -name '*.deb' -exec cp -f {} $(DEBOUT)/ \;; \
+	else \
+		echo "=== dkms mkdeb unsupported; building virtrtlab-dkms package via dpkg-deb ==="; \
+		PKGROOT=$$(mktemp -d); \
+		install -d $$PKGROOT/DEBIAN $$PKGROOT/usr/src; \
+		cp -a $(DKMSRC) $$PKGROOT/usr/src/; \
+		printf '%s\n' \
+		  'Package: virtrtlab-dkms' \
+		  'Version: $(VERSION)' \
+		  'Section: kernel' \
+		  'Priority: optional' \
+		  'Architecture: all' \
+		  'Maintainer: VirtRTLab <noreply@example.com>' \
+		  'Depends: dkms (>= 2.8.0)' \
+		  'Description: VirtRTLab DKMS source package' \
+		  ' VirtRTLab virtual peripheral modules for Linux with DKMS auto-rebuild.' \
+		  > $$PKGROOT/DEBIAN/control; \
+		printf '%s\n' \
+		  '#!/bin/sh' \
+		  'set -e' \
+		  'dkms add -m virtrtlab -v $(VERSION) || true' \
+		  'dkms build -m virtrtlab -v $(VERSION) || true' \
+		  'dkms install -m virtrtlab -v $(VERSION) || true' \
+		  'exit 0' \
+		  > $$PKGROOT/DEBIAN/postinst; \
+		chmod 0755 $$PKGROOT/DEBIAN/postinst; \
+		printf '%s\n' \
+		  '#!/bin/sh' \
+		  'set -e' \
+		  'dkms remove -m virtrtlab -v $(VERSION) --all || true' \
+		  'exit 0' \
+		  > $$PKGROOT/DEBIAN/prerm; \
+		chmod 0755 $$PKGROOT/DEBIAN/prerm; \
+		dpkg-deb --build $$PKGROOT $(DEBOUT)/virtrtlab-dkms_$(VERSION)_all.deb >/dev/null; \
+		rm -rf $$PKGROOT; \
+	fi; \
+	ls -1 $(DEBOUT)/*.deb >/dev/null 2>&1 || { \
+		echo "[FAIL] no .deb package produced"; \
+		exit 1; \
+	}; \
+	echo ""; \
+	echo "=== dkms-deb complete ==="; \
+	echo "    Packages are available in: $(DEBOUT)/"; \
+	ls -1 $(DEBOUT)/*.deb
+
+deb-dkms: dkms-deb
+
+deb-release-local:
+	@command -v dpkg-deb >/dev/null 2>&1 || { \
+		echo "[FAIL] dpkg-deb not found — install dpkg-dev"; \
+		exit 1; \
+	}
+	@chmod +x scripts/build_deb_package.sh
+	@./scripts/build_deb_package.sh v$(VERSION) $(DEBOUT)
+
+deb: deb-release-local
 
 # ── QA / local checks ─────────────────────────────────────────────────────────
 #

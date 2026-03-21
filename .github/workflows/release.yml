@@ -1,0 +1,70 @@
+# SPDX-License-Identifier: MIT
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: "build + release"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install packaging dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            dkms \
+            dpkg-dev \
+            linux-headers-$(uname -r)
+
+      - name: Generate changelog
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          PREV_TAG="$(git tag --sort=-creatordate | grep -v "^${TAG}$" | head -n 1 || true)"
+
+          {
+            echo "# Changelog ${TAG}"
+            echo
+            if [ -n "$PREV_TAG" ]; then
+              echo "Changes since ${PREV_TAG}:"
+              echo
+              git log --no-merges --pretty='- %s (%h)' "${PREV_TAG}..${TAG}"
+            else
+              echo "Initial release notes from repository history:"
+              echo
+              git log --no-merges --pretty='- %s (%h)'
+            fi
+          } > RELEASE_CHANGELOG.md
+
+      - name: Build Debian package
+        run: |
+          chmod +x scripts/build_deb_package.sh
+          ./scripts/build_deb_package.sh "${GITHUB_REF_NAME}" dist
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts-${{ github.ref_name }}
+          path: |
+            dist/*.deb
+            RELEASE_CHANGELOG.md
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.deb
+            RELEASE_CHANGELOG.md
