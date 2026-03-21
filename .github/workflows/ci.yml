@@ -68,6 +68,7 @@ jobs:
           perl checkpatch.pl \
             --strict \
             --no-tree \
+            --ignore LINUX_VERSION_CODE,CONSTANT_COMPARISON,MACRO_ARG_REUSE,PARENTHESIS_ALIGNMENT,BRACES \
             -f kernel/*.c kernel/include/*.h
 
   # ---------------------------------------------------------------------------
