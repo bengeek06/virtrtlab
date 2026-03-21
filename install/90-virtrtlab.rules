@@ -3,11 +3,21 @@
 # installed by: make install
 # removed by:   make uninstall
 
-# VirtRTLab sysfs attributes — group-writable for members of virtrtlab
-SUBSYSTEM=="virtrtlab", GROUP="virtrtlab", MODE="0664"
-
-# VirtRTLab char devices (wire devices, GPIO chardev)
+# VirtRTLab wire char devices (kernel ↔ daemon relay)
 KERNEL=="virtrtlab*", GROUP="virtrtlab", MODE="0660"
 
 # VirtRTLab UART AUT-facing TTY nodes
 KERNEL=="ttyVIRTLAB*", GROUP="virtrtlab", MODE="0660"
+
+# /dev/gpiochipN created by the GPIO subsystem for VirtRTLab virtual chips.
+# Match on SUBSYSTEMS=="virtrtlab" (the parent device lives on the virtrtlab
+# bus) to avoid touching unrelated gpiochips on the same system.
+SUBSYSTEM=="gpio", KERNEL=="gpiochip*", SUBSYSTEMS=="virtrtlab", \
+    GROUP="virtrtlab", MODE="0660"
+
+# inject sysfs attribute is created as --w------- (DEVICE_ATTR_WO expands to
+# S_IWUSR).  sysfs ignores chown on attribute files, so we fix the mode with
+# chmod g+w immediately after the device is registered.
+# ATTR{type}=="gpio" matches only VirtRTLab GPIO devices on the virtrtlab bus.
+ACTION=="add", SUBSYSTEM=="virtrtlab", ATTR{type}=="gpio", \
+    RUN+="/bin/chmod g+w /sys%p/inject"
