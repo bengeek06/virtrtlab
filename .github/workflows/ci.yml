@@ -19,6 +19,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 # Pinned kernel version used consistently across all kernel jobs.
 # Update KVER and KPKG together when bumping the base kernel.
 env:
@@ -212,10 +215,10 @@ jobs:
         run: bandit -r cli/ --severity-level medium
 
   # ---------------------------------------------------------------------------
-  # CLI — pytest (unit + integration)
+  # Centralized tests — CLI (already part of current workflow)
   # ---------------------------------------------------------------------------
   cli-pytest:
-    name: "cli · pytest"
+    name: "tests · cli"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -228,4 +231,52 @@ jobs:
         run: pip install pytest pytest-cov
 
       - name: Run tests
-        run: pytest tests/cli/ --cov=cli --cov-fail-under=49
+        run: |
+          mkdir -p test-artifacts
+          set -o pipefail
+          pytest tests/cli/ \
+            --cov=cli \
+            --cov-fail-under=49 \
+            --junitxml=test-artifacts/junit-cli.xml \
+            2>&1 | tee test-artifacts/pytest-cli.log
+
+      - name: Upload CLI test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-cli-reports
+          path: test-artifacts/
+
+  # ---------------------------------------------------------------------------
+  # Centralized tests — install/ (userspace-only)
+  # ---------------------------------------------------------------------------
+  install-pytest:
+    name: "tests · install"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: pip install pytest
+
+      - name: Ensure virtrtlab group exists
+        run: sudo groupadd -f virtrtlab
+
+      - name: Run tests
+        run: |
+          mkdir -p test-artifacts
+          set -o pipefail
+          pytest tests/install/ \
+            --junitxml=test-artifacts/junit-install.xml \
+            2>&1 | tee test-artifacts/pytest-install.log
+
+      - name: Upload install test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-install-reports
+          path: test-artifacts/
