@@ -36,7 +36,7 @@
 #define VIRTRTLAB_GPIO_MAX_LATENCY_NS	10000000000ULL
 #define VIRTRTLAB_GPIO_MAX_PPM		1000000U
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
 #define virtrtlab_hrtimer_init(_timer, _fn) \
 	hrtimer_setup((_timer), (_fn), CLOCK_MONOTONIC, HRTIMER_MODE_REL)
 #else
@@ -179,7 +179,7 @@ static void virtrtlab_gpio_set_common(struct gpio_chip *gc,
 	mutex_unlock(&gdev->lock);
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
 static int virtrtlab_gpio_set(struct gpio_chip *gc, unsigned int offset, int value)
 {
 	virtrtlab_gpio_set_common(gc, offset, value);
@@ -223,7 +223,7 @@ static void virtrtlab_gpio_set_multiple_common(struct gpio_chip *gc,
 
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
 static int virtrtlab_gpio_set_multiple(struct gpio_chip *gc,
 				       unsigned long *mask, unsigned long *bits)
 {

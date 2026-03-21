@@ -59,7 +59,7 @@
  */
 #define VIRTRTLAB_UART_DEFAULT_BAUD	38400U
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
 #define virtrtlab_hrtimer_init(_timer, _fn) \
 	hrtimer_setup((_timer), (_fn), CLOCK_MONOTONIC, HRTIMER_MODE_REL)
 #else
