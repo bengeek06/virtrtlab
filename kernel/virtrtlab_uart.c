@@ -31,6 +31,7 @@
 #include <linux/tty.h>
 #include <linux/tty_driver.h>
 #include <linux/tty_flip.h>
+#include <linux/version.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
 #include "virtrtlab_core.h"
@@ -57,6 +58,17 @@
  * baud=38400 matches tty_std_termios speed B38400.
  */
 #define VIRTRTLAB_UART_DEFAULT_BAUD	38400U
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+#define virtrtlab_hrtimer_init(_timer, _fn) \
+	hrtimer_setup((_timer), (_fn), CLOCK_MONOTONIC, HRTIMER_MODE_REL)
+#else
+#define virtrtlab_hrtimer_init(_timer, _fn) \
+	do { \
+		hrtimer_init((_timer), CLOCK_MONOTONIC, HRTIMER_MODE_REL); \
+		(_timer)->function = (_fn); \
+	} while (0)
+#endif
 
 /*
  * Per-device state — allocated in init, freed via dev->release().
@@ -734,8 +746,8 @@ static u64 virtrtlab_uart_byte_ns(u32 baud)
 	return div64_u64(10ULL * NSEC_PER_SEC, (u64)baud);
 }
 
-static ssize_t virtrtlab_tty_write(struct tty_struct *tty, const u8 *buf,
-				   size_t count)
+static ssize_t virtrtlab_tty_write_common(struct tty_struct *tty,
+					  const u8 *buf, size_t count)
 {
 	struct virtrtlab_uart_dev *udev = tty->driver_data;
 	unsigned int copied;
@@ -771,6 +783,25 @@ static ssize_t virtrtlab_tty_write(struct tty_struct *tty, const u8 *buf,
 	}
 	return copied;
 }
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+static ssize_t virtrtlab_tty_write(struct tty_struct *tty, const u8 *buf,
+			   size_t count)
+{
+	return virtrtlab_tty_write_common(tty, buf, count);
+}
+#else
+static int virtrtlab_tty_write(struct tty_struct *tty,
+			      const unsigned char *buf, int count)
+{
+	ssize_t ret;
+
+	ret = virtrtlab_tty_write_common(tty, buf, count);
+	if (ret < 0)
+		return (int)ret;
+	return (int)ret;
+}
+#endif
 
 static unsigned int virtrtlab_tty_write_room(struct tty_struct *tty)
 {
@@ -1318,8 +1349,8 @@ static int __init virtrtlab_uart_init(void)
 		udev->stopbits = 1;
 
 		/* fault injection engine placeholders */
-		hrtimer_setup(&udev->tx_timer, virtrtlab_uart_tx_timer_cb,
-			      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+		virtrtlab_hrtimer_init(&udev->tx_timer,
+				      virtrtlab_uart_tx_timer_cb);
 		INIT_WORK(&udev->tx_work, virtrtlab_uart_tx_work_fn);
 
 		udev->port.ops = &virtrtlab_port_ops;

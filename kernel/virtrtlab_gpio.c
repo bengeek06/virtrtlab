@@ -18,6 +18,7 @@
 #include <linux/printk.h>
 #include <linux/slab.h>
 #include <linux/types.h>
+#include <linux/version.h>
 #include <linux/workqueue.h>
 #include "virtrtlab_core.h"
 
@@ -34,6 +35,17 @@
  */
 #define VIRTRTLAB_GPIO_MAX_LATENCY_NS	10000000000ULL
 #define VIRTRTLAB_GPIO_MAX_PPM		1000000U
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+#define virtrtlab_hrtimer_init(_timer, _fn) \
+	hrtimer_setup((_timer), (_fn), CLOCK_MONOTONIC, HRTIMER_MODE_REL)
+#else
+#define virtrtlab_hrtimer_init(_timer, _fn) \
+	do { \
+		hrtimer_init((_timer), CLOCK_MONOTONIC, HRTIMER_MODE_REL); \
+		(_timer)->function = (_fn); \
+	} while (0)
+#endif
 
 static unsigned int num_gpio_devs = 1;
 module_param(num_gpio_devs, uint, 0444);
@@ -156,7 +168,8 @@ static int virtrtlab_gpio_get(struct gpio_chip *gc, unsigned int offset)
 	return val;
 }
 
-static int virtrtlab_gpio_set(struct gpio_chip *gc, unsigned int offset, int value)
+static void virtrtlab_gpio_set_common(struct gpio_chip *gc,
+				      unsigned int offset, int value)
 {
 	struct virtrtlab_gpio_dev *gdev = gpiochip_get_data(gc);
 
@@ -164,8 +177,20 @@ static int virtrtlab_gpio_set(struct gpio_chip *gc, unsigned int offset, int val
 	if (gdev->lines[offset].is_output)
 		gdev->lines[offset].value = value ? 1 : 0;
 	mutex_unlock(&gdev->lock);
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+static int virtrtlab_gpio_set(struct gpio_chip *gc, unsigned int offset, int value)
+{
+	virtrtlab_gpio_set_common(gc, offset, value);
 	return 0;
 }
+#else
+static void virtrtlab_gpio_set(struct gpio_chip *gc, unsigned int offset, int value)
+{
+	virtrtlab_gpio_set_common(gc, offset, value);
+}
+#endif
 
 static int virtrtlab_gpio_get_multiple(struct gpio_chip *gc,
 				       unsigned long *mask, unsigned long *bits)
@@ -182,8 +207,9 @@ static int virtrtlab_gpio_get_multiple(struct gpio_chip *gc,
 	return 0;
 }
 
-static int virtrtlab_gpio_set_multiple(struct gpio_chip *gc,
-				       unsigned long *mask, unsigned long *bits)
+static void virtrtlab_gpio_set_multiple_common(struct gpio_chip *gc,
+					       unsigned long *mask,
+					       unsigned long *bits)
 {
 	struct virtrtlab_gpio_dev *gdev = gpiochip_get_data(gc);
 	unsigned int i;
@@ -194,8 +220,23 @@ static int virtrtlab_gpio_set_multiple(struct gpio_chip *gc,
 			gdev->lines[i].value = test_bit(i, bits) ? 1 : 0;
 	}
 	mutex_unlock(&gdev->lock);
+
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+static int virtrtlab_gpio_set_multiple(struct gpio_chip *gc,
+				       unsigned long *mask, unsigned long *bits)
+{
+	virtrtlab_gpio_set_multiple_common(gc, mask, bits);
 	return 0;
 }
+#else
+static void virtrtlab_gpio_set_multiple(struct gpio_chip *gc,
+				       unsigned long *mask, unsigned long *bits)
+{
+	virtrtlab_gpio_set_multiple_common(gc, mask, bits);
+}
+#endif
 
 static int virtrtlab_gpio_get_direction(struct gpio_chip *gc, unsigned int offset)
 {
@@ -871,9 +912,8 @@ static int __init virtrtlab_gpio_init(void)
 		for (i = 0; i < VIRTRTLAB_GPIO_LINES; i++) {
 			gdev->lines[i].parent = gdev;
 			gdev->lines[i].index  = i;
-			hrtimer_setup(&gdev->lines[i].delay_timer,
-				      virtrtlab_gpio_timer_cb,
-				      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+			virtrtlab_hrtimer_init(&gdev->lines[i].delay_timer,
+					      virtrtlab_gpio_timer_cb);
 			INIT_WORK(&gdev->lines[i].apply_work,
 				  virtrtlab_gpio_apply_work_fn);
 		}
@@ -920,17 +960,11 @@ static int __init virtrtlab_gpio_init(void)
 		}
 
 		/*
-		 * gc.base is the first GPIO number in the system GPIO numberspace,
-		 * not the gpiochip character device index.
-		 * gpio_device_to_device(gc.gpiodev) returns the gpio_device's
-		 * struct device whose kobject name is "gpiochipN" — the same N
-		 * that appears in /dev/gpiochipN.  gc.gpiodev is a public field
-		 * of struct gpio_chip (driver.h); gpio_device_to_device() is the
-		 * public API to dereference it without touching the opaque internals
-		 * of struct gpio_device.
+		 * Keep a stable path hint without relying on gpio_device internals,
+		 * which are not exposed uniformly across all 6.x headers.
 		 */
-		snprintf(gdev->chip_path, sizeof(gdev->chip_path), "/dev/%s",
-			 dev_name(gpio_device_to_device(gdev->gc.gpiodev)));
+		snprintf(gdev->chip_path, sizeof(gdev->chip_path),
+			 "/dev/gpiochip%d", n);
 
 		ret = virtrtlab_bus_register_notifier(&gdev->nb);
 		if (ret) {

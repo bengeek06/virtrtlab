@@ -40,7 +40,7 @@ enum virtrtlab_bus_event {
  * The VirtRTLab virtual bus type.
  * Peripheral modules register their devices on this bus via device_register().
  */
-extern const struct bus_type virtrtlab_bus_type;
+extern struct bus_type virtrtlab_bus_type;
 
 /*
  * Root kobject for /sys/kernel/virtrtlab/devices/.
