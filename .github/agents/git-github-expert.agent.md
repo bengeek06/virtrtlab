@@ -9,12 +9,20 @@ tools:
   - terminalLastCommand
 handoffs:
   - label: "→ Next feature spec"
-    agent: spec-expert
+    agent: spec-author
     prompt: "The PR is merged. Let's move to the next feature. Please analyse the backlog and define the specification for the next issue."
     send: false
-  - label: "→ Implement"
+  - label: "→ Implement in kernel"
     agent: kernel-dev
     prompt: "The branch is ready. Please implement the feature according to the linked specification."
+    send: false
+  - label: "→ Implement in userspace"
+    agent: userspace-dev
+    prompt: "The branch is ready. Please implement the daemon or userspace C change according to the linked specification."
+    send: false
+  - label: "→ Implement in Python"
+    agent: python-dev
+    prompt: "The branch is ready. Please implement the CLI or Python-side change according to the linked specification."
     send: false
 ---
 

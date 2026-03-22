@@ -16,7 +16,7 @@ handoffs:
     prompt: "Please review the code I just wrote or modified, using your full structured review process."
     send: false
   - label: "→ Update spec"
-    agent: spec-expert
+    agent: spec-author
     prompt: "The implementation raised questions or deviations from the spec. Please review and update the specification accordingly."
     send: false
 ---
