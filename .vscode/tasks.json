@@ -112,9 +112,8 @@
             "command": "sudo",
             "args": [
                 "-n",
-                "-E",
                 "/usr/bin/python3",
-                "cli/virtrtlabctl.py",
+                "${workspaceFolder}/cli/virtrtlabctl.py",
                 "--no-sudo",
                 "down"
             ],
@@ -128,9 +127,8 @@
             "command": "sudo",
             "args": [
                 "-n",
-                "-E",
                 "/usr/bin/python3",
-                "cli/virtrtlabctl.py",
+                "${workspaceFolder}/cli/virtrtlabctl.py",
                 "--no-sudo",
                 "up",
                 "--uart",
@@ -152,7 +150,6 @@
             "command": "sudo",
             "args": [
                 "-n",
-                "-E",
                 "/usr/sbin/insmod",
                 "${workspaceFolder}/kernel/virtrtlab_core.ko"
             ],
@@ -166,7 +163,6 @@
             "command": "sudo",
             "args": [
                 "-n",
-                "-E",
                 "/usr/sbin/insmod",
                 "${workspaceFolder}/kernel/virtrtlab_uart.ko",
                 "num_uart_devices=1"
@@ -181,7 +177,6 @@
             "command": "sudo",
             "args": [
                 "-n",
-                "-E",
                 "/usr/sbin/insmod",
                 "${workspaceFolder}/kernel/virtrtlab_gpio.ko",
                 "num_gpio_devs=1"
@@ -216,7 +211,6 @@
             "command": "sudo",
             "args": [
                 "-n",
-                "-E",
                 "${workspaceFolder}/daemon/virtrtlabd",
                 "--num-uarts",
                 "1",
@@ -240,7 +234,6 @@
             "command": "sudo",
             "args": [
                 "-n",
-                "-E",
                 "/usr/bin/python3",
                 "${workspaceFolder}/cli/virtrtlabctl.py",
                 "--no-sudo",

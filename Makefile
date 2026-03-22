@@ -178,12 +178,13 @@ install: _check_root
 
 install-dev: install
 	@echo "=== Installing development/CI sudoers fragment ==="
-	@tmp=$$(mktemp); \
+	@set -e; \
+	tmp=$$(mktemp); \
+	trap 'rm -f "$$tmp"' EXIT; \
 	repo_esc=$$(printf '%s\n' "$(CURDIR)" | sed 's/[&|]/\\&/g'); \
-	sed "s|@REPO_ROOT@|$$repo_esc|g" install/virtrtlab-dev.sudoers > $$tmp; \
-	visudo -cf $$tmp; \
-	install -m 440 $$tmp $(SUDOERS)/virtrtlab-dev; \
-	rm -f $$tmp
+	sed "s|@REPO_ROOT@|$$repo_esc|g" install/virtrtlab-dev.sudoers > "$$tmp"; \
+	visudo -cf "$$tmp"; \
+	install -m 440 "$$tmp" $(SUDOERS)/virtrtlab-dev
 	@echo "=== install-dev complete ==="
 
 # ── uninstall ─────────────────────────────────────────────────────────────────

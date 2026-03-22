@@ -12,14 +12,14 @@ Use this skill when a patch exists and you want to make it ready for human or ag
 1. Confirm the change matches the current contract in README.md and docs/.
 2. Run `make check`.
 3. Run the relevant QA targets:
-	- `make qa` for CLI and daemon changes
-	- `make qa-kernel-lint` when `kernel/**` changes
+    - `make qa` for CLI and daemon changes
+    - `make qa-kernel-lint` when `kernel/**` changes
 4. Run the narrowest relevant domain tests.
 5. Run the pytest suites separately before any PR:
-	- `python3 -m pytest -c pytest.ini tests/cli`
-	- `python3 -m pytest -c pytest.ini tests/daemon`
-	- `python3 -m pytest -c pytest.ini tests/kernel`
-	- `python3 -m pytest -c pytest.ini tests/install`
+    - `python3 -m pytest -c pytest.ini tests/cli`
+    - `python3 -m pytest -c pytest.ini tests/daemon`
+    - `python3 -m pytest -c pytest.ini tests/kernel`
+    - `python3 -m pytest -c pytest.ini tests/install`
 6. Check whether docs need updating.
 7. Request the matching reviewer agent for the touched domain.
 8. Address blockers and majors before asking for PR preparation or push for review.
