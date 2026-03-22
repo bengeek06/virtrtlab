@@ -1,12 +1,18 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 
-# VirtRTLab Simulator Contract (v0.2 Draft)
+# VirtRTLab Simulator Contract (v0.2.0 Draft)
 
 This document is the source of truth for the simulator catalog and lifecycle contract targeted at `v0.2.0`.
 
-It defines how `virtrtlabctl` discovers simulators, how a simulator is attached to a VirtRTLab device, and which runtime context is passed to the simulator process.
+It defines how the VirtRTLab control plane discovers simulators, how a
+simulator is attached to a VirtRTLab device, and which runtime context is
+passed to the simulator process.
 
-This contract belongs to VirtRTLab itself. Protocol-specific simulators such as GPS, sensor, switch-console, or register-oriented component peers may live in separate repositories, but they must conform to the rules defined here if they want to be managed by `virtrtlabctl`.
+In `v0.2.0`, the daemon is the authoritative owner of simulator attachment and
+lifecycle state. `virtrtlabctl` remains the normal human-facing client of that
+daemon control plane.
+
+This contract belongs to VirtRTLab itself. Protocol-specific simulators such as GPS, sensor, switch-console, or register-oriented component peers may live in separate repositories, but they must conform to the rules defined here if they want to be managed by VirtRTLab.
 
 ---
 
@@ -19,7 +25,7 @@ The contract covers:
 - simulator catalog discovery
 - user-extensible simulator definitions
 - device-to-simulator attachment
-- runtime context passed by `virtrtlabctl`
+- runtime context passed by the daemon-managed simulator lifecycle
 - lifecycle expectations for start, stop, failure, and teardown
 
 The contract does not cover:
@@ -80,7 +86,7 @@ loopback.toml
 
 ### 3.3 Discovery paths and precedence
 
-`virtrtlabctl` searches simulator definitions in the following precedence order.
+The VirtRTLab control plane searches simulator definitions in the following precedence order.
 Later entries override earlier ones when the simulator name is identical.
 
 | Precedence | Path | Purpose |
@@ -109,7 +115,7 @@ Required top-level keys:
 | `name` | string | Stable simulator name used by CLI and profiles. |
 | `version` | string | Simulator version identifier. Required for validation traceability. |
 | `summary` | string | One-line human-readable description. |
-| `exec` | array of strings | Command vector executed by `virtrtlabctl` (`execve` style). |
+| `exec` | array of strings | Command vector executed by the daemon-managed simulator launcher (`execve` style). |
 | `supports` | array of strings | Supported VirtRTLab device kinds such as `uart`, later `spi` or `i2c`. |
 
 Optional top-level keys:
@@ -216,7 +222,8 @@ In `v0.2.0`, the attachment model is intentionally simple:
 - one managed simulator attachment targets exactly one VirtRTLab device
 - no fan-out, tap, or observer graph is defined in `v0.2.0`
 
-This matches the existing single-active-connection model on `/run/virtrtlab/<device>.sock`.
+This matches the single-active-connection dataplane model on
+`/run/virtrtlab/devices/<device>.sock`.
 
 ### 4.2 Attachment states
 
@@ -226,9 +233,9 @@ An attachment has the following conceptual states:
 |---|---|
 | `detached` | no simulator is associated with the device |
 | `attached` | simulator is selected but not running |
-| `starting` | `virtrtlabctl` is launching the simulator |
+| `starting` | the daemon is launching the simulator |
 | `running` | simulator process exists and has not exited; in `v0.2.0` this is a liveness state, not a readiness guarantee |
-| `stopping` | `virtrtlabctl` has requested termination and is waiting for process exit |
+| `stopping` | the daemon has requested termination and is waiting for process exit |
 | `failed` | launch failed or the simulator exited unexpectedly |
 | `stopped` | simulator was previously running and has been stopped cleanly |
 
@@ -269,7 +276,7 @@ Validation rules:
 - `device` must exist in the resolved device set
 - `simulator` must exist in the resolved catalog
 - if `version` is present, the `(simulator, version)` pair must exist in the resolved catalog
-- if `version` is absent and multiple visible catalog entries share the same simulator name, validation fails with an ambiguity error
+- if `version` is absent and multiple visible catalog entries share the same simulator name, validation fails with `ambiguous-simulator-version`
 - the simulator must support the target device kind
 - unknown `config` keys are rejected
 - missing required parameters are rejected
@@ -390,11 +397,11 @@ delay_ms = 0
 
 Lifecycle expectations in `v0.2.0`:
 
-- `virtrtlabctl up --config` may create and auto-start declared attachments
+- `virtrtlabctl up --config` may request that the daemon create and auto-start declared attachments
 - only attachments with `auto_start = true` are started automatically by default
-- `virtrtlabctl down` stops managed simulators before tearing down kernel modules
+- `virtrtlabctl down` requests that the daemon stop managed simulators before tearing down the active lab topology
 - if a simulator exits unexpectedly, the attachment state becomes `failed`
-- `restart_policy = "never"` means `virtrtlabctl` records failure and does not restart automatically
+- `restart_policy = "never"` means the daemon records failure and does not restart automatically
 - `restart_policy = "on-failure"` means a later revision may restart automatically; the contract reserves the value now but does not require immediate implementation sophistication
 
 `restart_policy` semantics in `v0.2.0`:
@@ -423,7 +430,20 @@ Bus reset semantics:
 - `vrtlbus0 state=reset` does **not** imply that `virtrtlabctl` must kill the simulator process
 - managed simulators must tolerate daemon disconnect and later re-connection when the runtime socket becomes usable again
 
+Minimum reconnect contract after dataplane loss caused by reset:
+
+- a compliant simulator must treat loss of the current dataplane connection as a transient condition when the attachment state is still managed and the process is not being stopped
+- after observing EOF, connection reset, or initial connect failure during a reset window, the simulator should retry `connect()` to `VIRTRTLAB_SIM_SOCKET` with bounded backoff instead of exiting immediately
+- the retry backoff should be short and bounded; the recommended initial range for `v0.2.0` interoperability is 50 ms to 500 ms between attempts
+- no dedicated readiness event is required in `v0.2.0`; simulator authors should treat successful reconnect as the readiness signal for resumed dataplane traffic
+- operator tooling should not infer reconnect success from process liveness alone; it should use `sim status`, device-level reads, or an explicit end-to-end probe when reconnect timing matters
+
 This preserves the existing daemon model and avoids conflating bus reset with process supervision.
+
+Path-discovery rule:
+
+- simulator processes must use the resolved runtime paths passed by environment variables such as `VIRTRTLAB_SIM_SOCKET`, `VIRTRTLAB_SIM_CONFIG`, and `VIRTRTLAB_SIM_LOG_DIR`
+- examples under `/run/virtrtlab/...` are the default installed layout, not the only valid deployed layout
 
 ### 4.5 Profile-driven startup failure semantics
 
@@ -469,7 +489,7 @@ The command line is kept stable and explicit:
 
 - `exec` and `args` come from the catalog entry
 - `virtrtlabctl` does **not** invent hidden positional arguments
-- the resolved attachment configuration is written to a file and exposed through an environment variable
+- the resolved attachment configuration is written by the daemon to a file and exposed through an environment variable
 
 This keeps third-party simulators shell-agnostic and avoids a fragile placeholder-expansion mini-language in `v0.2.0`.
 
@@ -481,10 +501,10 @@ This keeps third-party simulators shell-agnostic and avoids a fragile placeholde
 | `VIRTRTLAB_SIM_INSTANCE_ID` | string | Runtime-unique attachment instance identifier. |
 | `VIRTRTLAB_SIM_DEVICE` | string | Target device name, e.g. `uart0`. |
 | `VIRTRTLAB_SIM_DEVICE_TYPE` | string | Device kind, e.g. `uart`. |
-| `VIRTRTLAB_SIM_SOCKET` | absolute path | Runtime socket path to connect to, e.g. `/run/virtrtlab/uart0.sock`. |
+| `VIRTRTLAB_SIM_SOCKET` | absolute path | Runtime dataplane socket path to connect to, e.g. `/run/virtrtlab/devices/uart0.sock`. |
 | `VIRTRTLAB_SIM_RUN_DIR` | absolute path | VirtRTLab runtime directory, e.g. `/run/virtrtlab`. |
 | `VIRTRTLAB_SIM_CONTROL_DIR` | absolute path | Sysfs control root for the target device when available, e.g. `/sys/kernel/virtrtlab/devices/uart0`. |
-| `VIRTRTLAB_SIM_CONFIG` | absolute path | Resolved attachment configuration file written by `virtrtlabctl`. |
+| `VIRTRTLAB_SIM_CONFIG` | absolute path | Resolved attachment configuration file written by the daemon. |
 | `VIRTRTLAB_SIM_LOG_DIR` | absolute path | Directory reserved for simulator log files (e.g. `stdout.log`, `stderr.log`). |
 
 Optional variables reserved for later use:
@@ -506,12 +526,12 @@ Rules:
 
 - `exec` is required and must not be empty
 - `args` is optional and may be empty
-- `virtrtlabctl` does not append implicit `--socket`, `--device`, or positional arguments in `v0.2.0`
+- the daemon-managed launcher does not append implicit `--socket`, `--device`, or positional arguments in `v0.2.0`
 - simulator authors must read runtime context from environment variables and the config file referenced by `VIRTRTLAB_SIM_CONFIG`
 
 ### 5.4 Resolved configuration file
 
-Before launching a simulator, `virtrtlabctl` writes the fully resolved attachment configuration to a TOML file.
+Before launching a simulator, the daemon writes the fully resolved attachment configuration to a TOML file.
 
 The file includes:
 
@@ -546,7 +566,7 @@ Managed simulators are ordinary userspace processes.
 
 In `v0.2.0`, the intended execution model is:
 
-- the simulator runs as the invoking user when that user already has access to `/run/virtrtlab/*.sock`
+- the simulator runs under the daemon-managed service context in the normal installed profile
 - the simulator must not require root by default
 - access to the runtime socket is granted by the existing `virtrtlab` group model
 
@@ -559,6 +579,10 @@ Managed simulator state lives under:
 ```text
 /run/virtrtlab/simulators/
 ```
+
+This path is the default installed simulator runtime root. The resolved runtime
+root comes from daemon configuration and remains the value surfaced through the
+environment and control-plane-visible paths.
 
 The directory layout is per attached device.
 
@@ -599,7 +623,9 @@ Rules:
 - `pid` exists only while a simulator process is believed alive
 - `state.json` remains after process exit so failures are inspectable
 - `logs/` is created lazily on first start of the attachment
-- `virtrtlabctl down` removes runtime-only state for active processes but may preserve attachment state if the command is later specified to support persistent lab attachments; `v0.2.0` initial expectation is full cleanup of process runtime under `/run`
+- the daemon owns creation, mutation, and cleanup of this runtime state
+- `virtrtlabctl down` requests daemon-side cleanup of runtime-only state for active processes; `v0.2.0` initial expectation is full cleanup of process runtime under `/run`
+- these files are a normative simulator-runtime observability surface only; they do not replace the control socket as the topology-control API
 
 ### 5.6.1 Per-device `state.json` format
 
@@ -747,10 +773,10 @@ Disallowed transitions and CLI outcomes:
 |---|---|---|
 | `running` | `sim start` | state conflict error |
 | `starting` | `sim start` | state conflict error |
-| `attached` | `sim stop` | operational error because no process exists |
-| `failed` | `sim stop` | operational error because no live process exists |
-| `detached` | `sim start` | not-found error because no attachment exists |
-| `detached` | `sim detach` | not-found error because no attachment exists |
+| `attached` | `sim stop` | state conflict error because no process is running |
+| `failed` | `sim stop` | state conflict error because no process is running |
+| `detached` | `sim start` | `not-attached` control-plane error, mapped to CLI exit code `4` |
+| `detached` | `sim detach` | `not-attached` control-plane error, mapped to CLI exit code `4` |
 
 Crash semantics:
 
@@ -815,7 +841,7 @@ Observable outcomes:
 | `sim attach uart0 ...` racing with `sim detach uart0` | serialized; final state matches command completion order |
 | `sim status uart0` during `sim start uart0` | may report `attached`, `starting`, or `running`, but must return a coherent single state object |
 | `sim status` during updates on multiple devices | aggregate output may reflect some devices before and others after independent operations, but each per-device object must be coherent |
-| `down` racing with any `sim * <device>` mutation | `down` wins once it acquires the relevant lock scope; later commands fail with operational or not-found errors depending on the resulting lab state |
+| `down` racing with any `sim * <device>` mutation | `down` wins once it acquires the relevant lock scope; later commands fail with operational, `not-attached`, or `unknown-device` outcomes depending on the resulting lab state |
 
 The contract does not require fairness beyond eventual completion.
 It does require bounded waiting or explicit failure rather than indefinite blocking.
@@ -839,6 +865,7 @@ The initial persistence contract is intentionally simple:
 - attachment definitions created by `sim attach` are runtime-local, not reboot-persistent
 - `state.json`, `attachment.toml`, `config.toml`, `pid`, and `logs/` are all disposable runtime artifacts
 - after reboot or any loss of `/run/virtrtlab/simulators/`, no attachment is considered to exist anymore unless it is recreated by `sim attach` or `up --config`
+- no daemon or CLI client may treat these runtime files as a durable substitute for control-plane topology state
 
 Observable semantics by event:
 
@@ -855,9 +882,9 @@ Observable semantics by event:
 Rules for commands after runtime loss:
 
 - `sim status` with no existing runtime directory returns an empty attachment set, not an operational error
-- `sim status <device>` returns not found when no per-device runtime state exists
-- `sim start <device>` returns not found when the attachment runtime directory is absent, even if a simulator process somehow still exists outside management
-- `sim detach <device>` returns not found when no managed attachment runtime state exists
+- `sim status <device>` returns a no-attachment condition for an existing device and a not-found condition only when the device itself is absent
+- `sim start <device>` returns a no-attachment condition when the attachment runtime directory is absent, even if a simulator process somehow still exists outside management
+- `sim detach <device>` returns a no-attachment condition when no managed attachment runtime state exists
 
 Relationship with profiles:
 
@@ -887,7 +914,7 @@ It is both:
 
 In `v0.2.0`, `loopback` supports only `uart` attachments.
 
-It connects to the runtime socket specified by `VIRTRTLAB_SIM_SOCKET` and echoes received bytes back to the same link.
+It connects to the runtime dataplane socket specified by `VIRTRTLAB_SIM_SOCKET` and echoes received bytes back to the same link.
 
 ### 6.2 Required behaviour
 
@@ -957,7 +984,7 @@ Its role is to make simulator process behaviour easy to control from tests.
 
 In `v0.2.0`, `test-stub` may support `uart` attachments only.
 
-It should still connect to `VIRTRTLAB_SIM_SOCKET` when operating in steady-state `run` mode so that attachment startup exercises the same socket-path contract as ordinary simulators.
+It should still connect to `VIRTRTLAB_SIM_SOCKET` when operating in steady-state `run` mode so that attachment startup exercises the same dataplane-socket path contract as ordinary simulators.
 
 #### Required behaviour
 
@@ -1112,8 +1139,8 @@ The output includes at least:
 
 Machine-readable contract:
 
-- `virtrtlabctl --json sim inspect <name>` returns one JSON object
-- when multiple visible versions share the same simulator name, `--version VERSION` is required
+- `virtrtlabctl --json sim inspect <name>` returns exactly the daemon `result` payload for `sim.inspect`
+- when multiple visible versions share the same simulator name, `--version VERSION` is required and the daemon error is `ambiguous-simulator-version`
 - field names must match catalog semantics directly and remain stable across `v0.2.x`
 - unknown optional catalog fields may be added later but existing fields must not change type
 
@@ -1143,9 +1170,11 @@ Behaviour:
 
 - validates that the device exists
 - validates that the selected simulator name exists, and if `--version` is provided validates the exact `(name, version)` pair
-- fails with an ambiguity error when multiple visible versions share the same simulator name and `--version` is omitted
+- fails with `ambiguous-simulator-version` when multiple visible versions share the same simulator name and `--version` is omitted
 - validates that the resolved simulator supports the device kind
 - validates all provided config keys against declared parameters
+- replaces an existing attachment only when its current state is `attached`, `stopped`, or `failed`
+- attempting replacement while the current attachment is `starting`, `running`, or `stopping` fails with a state conflict
 - writes the resolved attachment state into the VirtRTLab runtime state directory
 - does **not** start the simulator process implicitly; use `sim start` or profile-driven startup
 
@@ -1157,7 +1186,7 @@ Behaviour:
 
 - if a simulator is currently running for the device, `sim detach` stops it first
 - attachment state and generated runtime config files are removed afterwards
-- detaching an already detached device returns a not-found style error
+- detaching an already detached device returns the control-plane error `not-attached`, which the CLI maps to exit code `4`
 
 ### 7.6 `sim start`
 
@@ -1166,6 +1195,7 @@ Starts the simulator attached to one device.
 Behaviour:
 
 - requires an existing attachment
+- returns the control-plane error `not-attached` when the device exists but has no attachment
 - fails if the attachment is already in `starting` or `running`
 - launches the simulator using the catalog `exec` and `args`
 - provides runtime context exclusively through the environment variables and config file defined in this document
@@ -1182,7 +1212,9 @@ Behaviour:
 - if the attachment is `running`, sends a graceful termination signal first
 - if the process does not exit within a bounded timeout, force-kills it
 - leaves the attachment definition in place and moves the state to `stopped`
-- stopping an attachment that is not running is a no-op success only when the state is already `stopped`; otherwise it is an error for a missing attachment
+- stopping an attachment that is already `stopped` is a no-op success
+- stopping an attachment in `attached` or `failed` returns a state conflict
+- stopping a device with no attachment returns the control-plane error `not-attached`, which the CLI maps to exit code `4`
 
 ### 7.8 `sim status`
 
@@ -1195,6 +1227,7 @@ Without argument:
 With `<device>`:
 
 - prints detailed status for the specified device only
+- if the device exists but has no attachment, the control-plane error is `not-attached`, which the CLI maps to exit code `4`
 
 Status payload includes at least:
 
@@ -1209,8 +1242,8 @@ Status payload includes at least:
 
 Machine-readable contract:
 
-- `virtrtlabctl --json sim status` returns the aggregate state file shape defined in section `5.6.2`
-- `virtrtlabctl --json sim status <device>` returns the per-device state file shape defined in section `5.6.1`
+- `virtrtlabctl --json sim status` returns exactly the daemon `result` payload for aggregate `sim.status`; that payload matches the aggregate state-file shape defined in section `5.6.2`
+- `virtrtlabctl --json sim status <device>` returns exactly the daemon `result` payload for per-device `sim.status`; that payload matches the per-device state-file shape defined in section `5.6.1`
 - human-readable output may evolve cosmetically, but the JSON schema is part of the compatibility contract
 
 Human-readable contract:
@@ -1251,9 +1284,9 @@ Recommended mapping for simulator commands:
 |---|---|
 | 0 | Success |
 | 1 | Operational error (spawn failure, process stop timeout, catalog parse error, filesystem error) |
-| 2 | Bad arguments, invalid config syntax, or parameter type validation error |
+| 2 | Bad arguments, ambiguous simulator version selection, invalid config syntax, or parameter type validation error |
 | 3 | State conflict (already running, already attached, already starting) |
-| 4 | Not found or incompatible target (unknown simulator, unknown device, unsupported device kind, no attachment) |
+| 4 | Not found or incompatible target (unknown simulator, unknown device, incompatible target, no attachment) |
 
 Stable JSON error envelope:
 
@@ -1266,6 +1299,7 @@ Rules:
 - the `error` string is for operators and logs
 - the numeric `code` is the scripting contract
 - the same numeric meaning must be preserved in human and JSON modes
+- control-plane string errors such as `ambiguous-simulator-version` and `not-attached` are preserved only inside daemon responses; the CLI contract remains numeric at this layer
 
 Human-readable error wording guidance:
 
@@ -1287,12 +1321,13 @@ They are written as observable behaviours, not implementation tests.
 | crash transition | killing the simulator unexpectedly yields `failed`, null `pid`, populated `last_error` or non-zero `last_exit_code` |
 | `on-failure` without supervisor | a simulator with `restart_policy = on-failure` still remains `failed` after crash until an explicit command acts |
 | restart after failure | `failed -> starting -> running` is observable and clears `last_error` on success |
-| detach cleanup | `sim detach` removes the per-device runtime directory and later `sim status <device>` returns not found |
+| detach cleanup | `sim detach` removes the per-device runtime directory and later `sim status <device>` returns `not-attached` when the device still exists |
 | aggregate status regeneration | deleting aggregate `state.json` and running `sim status` regenerates a coherent aggregate view |
 | lost runtime dir | removing `/run/virtrtlab/simulators/` makes `sim status` return an empty set |
 | invalid `--set` syntax | malformed `--set` returns exit code `2` |
 | invalid `--set` type | parameter type mismatch or overflow returns exit code `2` |
 | unknown top-level parameter | `sim attach --set unknown=...` returns exit code `4` or `2` only if the CLI cannot even parse the expression; preferred result is `4` for unknown target parameter |
+| ambiguous simulator version | `sim inspect` or `sim attach` without `--version` on a multiply-defined simulator returns exit code `2` |
 | concurrent `sim start` | one command succeeds, the other reports a coherent state conflict or already-running result |
 | concurrent `sim stop` and `sim start` | no torn state file is observed; final state matches serialized completion order |
 | profile partial auto-start failure | `up --config` returns non-zero, successful earlier attachments remain observable, failed one is in `failed`, later ones remain `attached` |
@@ -1325,6 +1360,6 @@ Environment variables are good for stable runtime context such as device names a
 
 ---
 
-## 9. Open questions
+## 9. Decision
 
 No open questions remain in this first draft of the simulator contract.
