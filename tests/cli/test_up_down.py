@@ -73,6 +73,10 @@ def _run_cli_pty(
         while True:
             if time.monotonic() >= deadline:
                 proc.kill()
+                try:
+                    proc.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    pass
                 raise AssertionError(f"CLI hung on PTY: {' '.join(argv)}")
 
             ready, _, _ = select.select([master_fd], [], [], 0.1)

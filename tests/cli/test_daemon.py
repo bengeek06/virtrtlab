@@ -186,7 +186,44 @@ class TestDaemonLaunchDetachment:
             "/tmp/virtrtlabd",
         )
 
-        with pytest.raises(ctl.VirtrtlabError, match="failed to spawn detached daemon helper"):
+        with pytest.raises(ctl.VirtrtlabError, match="failed to start daemon"):
+            ctl.cmd_spawn_daemon_detached(args)
+
+    def test_launch_daemon_wraps_direct_spawn_error(self, monkeypatch):
+        monkeypatch.setattr(ctl.os, "geteuid", lambda: 0)
+
+        def fake_popen(*args, **kwargs):
+            raise FileNotFoundError("missing")
+
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+        with pytest.raises(ctl.VirtrtlabError, match="failed to start daemon"):
+            ctl._launch_daemon(False, 2, "/tmp/virtrtlab-test")
+
+    def test_internal_spawn_command_reports_pid_write_error(self, monkeypatch, tmp_path):
+        def fake_popen(*args, **kwargs):
+            return SimpleNamespace(pid=2222)
+
+        def fake_write_text(self, data, encoding=None, errors=None, newline=None):
+            raise OSError("read-only")
+
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+        monkeypatch.setattr(Path, "write_text", fake_write_text)
+
+        pid_file = tmp_path / "daemon.pid"
+        args = make_args(
+            "__spawn-daemon-detached",
+            "--num-uarts",
+            "1",
+            "--run-dir",
+            "/tmp/virtrtlab-test",
+            "--pid-file",
+            str(pid_file),
+            "--daemon-bin",
+            "/tmp/virtrtlabd",
+        )
+
+        with pytest.raises(ctl.VirtrtlabError, match="failed to write daemon pid file"):
             ctl.cmd_spawn_daemon_detached(args)
 
 

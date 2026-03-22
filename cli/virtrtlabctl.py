@@ -389,14 +389,20 @@ def _spawn_daemon_detached(
     num_uarts: int, run_dir: str, daemon_bin: str = DAEMON_BIN
 ) -> subprocess.Popen[Any]:
     """Start virtrtlabd detached from the caller's interactive terminal."""
-    return subprocess.Popen(
-        [daemon_bin, "--num-uarts", str(num_uarts), "--run-dir", run_dir],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-        close_fds=True,
-    )
+    try:
+        return subprocess.Popen(
+            [daemon_bin, "--num-uarts", str(num_uarts), "--run-dir", run_dir],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except OSError as exc:
+        raise VirtrtlabError(
+            f"failed to start daemon '{daemon_bin}': {exc.strerror or exc}",
+            exit_code=1,
+        ) from exc
 
 
 def _launch_daemon(no_sudo: bool, num_uarts: int, run_dir: str) -> int | None:
@@ -1181,13 +1187,22 @@ def cmd_spawn_daemon_detached(args: argparse.Namespace) -> int:
             args.run_dir,
             daemon_bin=args.daemon_bin,
         )
-        Path(args.pid_file).write_text(str(proc.pid) + "\n")
-        return 0
     except OSError as exc:
         raise VirtrtlabError(
             f"failed to spawn detached daemon helper: {exc.strerror or exc}",
             exit_code=1,
         ) from exc
+
+    pid_path = Path(args.pid_file)
+    try:
+        pid_path.write_text(str(proc.pid) + "\n")
+    except OSError as exc:
+        raise VirtrtlabError(
+            f"failed to write daemon pid file '{pid_path}': {exc.strerror or exc}",
+            exit_code=1,
+        ) from exc
+
+    return 0
 
 
 # ---------------------------------------------------------------------------
