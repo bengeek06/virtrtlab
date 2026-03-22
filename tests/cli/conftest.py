@@ -8,7 +8,7 @@ ctl.SYSFS_ROOT / ctl.RUN_DIR via the fake_sysfs fixture and never
 touch real sysfs or load kernel modules.
 
 Integration tests (test_up_down.py, test_daemon.py) require:
-  - Passwordless sudo (sudo -n true)
+    - Cached sudo credentials (`sudo -v` in the current session)
   - Built .ko files under kernel/
   - virtrtlabd binary under daemon/
 They are automatically skipped when those prerequisites are absent.
@@ -113,10 +113,12 @@ def fake_uart(fake_sysfs):
 
 @pytest.fixture(scope="session")
 def require_root():
-    """Skip integration tests if passwordless sudo is not available."""
+    """Skip integration tests if cached sudo credentials are not available."""
     r = subprocess.run(["sudo", "-n", "true"], capture_output=True)
     if r.returncode != 0:
-        pytest.skip("Integration tests require passwordless sudo (sudo -v first)")
+        pytest.skip(
+            "Integration tests require cached sudo credentials (run: sudo -v first)"
+        )
 
 
 @pytest.fixture(scope="session")

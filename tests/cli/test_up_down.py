@@ -4,7 +4,7 @@
 test_up_down.py — integration tests for cmd_up and cmd_down.
 
 Requires:
-  - Passwordless sudo (see conftest.require_root)
+    - Cached sudo credentials (see conftest.require_root; run sudo -v first)
   - Built kernel .ko files under kernel/ (see conftest.require_modules)
 
 All tests use a temporary TOML profile and call the CLI via subprocess
@@ -12,7 +12,11 @@ so that sudo is applied naturally by virtrtlabctl itself.
 """
 
 import json
+import os
+import pty
+import select
 import subprocess
+import termios
 import time
 from pathlib import Path
 
@@ -41,6 +45,64 @@ def _write_lab_toml(path: Path, uart_count: int = 1) -> str:
     p = path / "lab.toml"
     p.write_text(toml)
     return str(p)
+
+
+def _run_cli_pty(
+    *argv: str, sudo: bool = False, timeout: float | None = None
+) -> tuple[int, str, list[object], list[object]]:
+    """Run the CLI on a pseudo-terminal and return rc, output, before, after."""
+    if timeout is None:
+        timeout = float(os.environ.get("VIRTRTLAB_TEST_PTY_TIMEOUT", "15.0"))
+
+    master_fd, slave_fd = pty.openpty()
+    before = termios.tcgetattr(slave_fd)
+    proc = subprocess.Popen(
+        (["sudo"] if sudo else []) + ["python3", CLI_SCRIPT, *argv],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        close_fds=True,
+    )
+
+    output = bytearray()
+    deadline = time.monotonic() + timeout
+    idle_after_exit = 0
+    os.set_blocking(master_fd, False)
+
+    try:
+        while True:
+            if time.monotonic() >= deadline:
+                proc.kill()
+                raise AssertionError(f"CLI hung on PTY: {' '.join(argv)}")
+
+            ready, _, _ = select.select([master_fd], [], [], 0.1)
+            read_any = False
+            if ready:
+                try:
+                    chunk = os.read(master_fd, 4096)
+                except OSError:
+                    chunk = b""
+                if chunk:
+                    output.extend(chunk)
+                    read_any = True
+
+            if proc.poll() is None:
+                idle_after_exit = 0
+                continue
+
+            if read_any:
+                idle_after_exit = 0
+                continue
+
+            idle_after_exit += 1
+            if idle_after_exit >= 3:
+                break
+
+        after = termios.tcgetattr(slave_fd)
+        return proc.wait(timeout=1.0), output.decode(errors="replace"), before, after
+    finally:
+        os.close(master_fd)
+        os.close(slave_fd)
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +166,26 @@ class TestCmdUp:
         assert "aut_path" in device
         assert "env" in device
         assert "VIRTRTLAB_UART0" in device["env"]
+
+    def test_up_preserves_terminal_with_internal_sudo(self, require_daemon_bin, require_modules, tmp_path):
+        toml = _write_lab_toml(tmp_path)
+        try:
+            rc, output, before, after = _run_cli_pty("up", "--config", toml)
+            assert rc == 0, output
+            assert before == after
+            assert "[ok] uart0 loaded" in output
+        finally:
+            run_ctl("down")
+
+    def test_up_preserves_terminal_when_already_root(self, require_daemon_bin, require_modules, tmp_path):
+        toml = _write_lab_toml(tmp_path)
+        try:
+            rc, output, before, after = _run_cli_pty("--no-sudo", "up", "--config", toml, sudo=True)
+            assert rc == 0, output
+            assert before == after
+            assert "[ok] uart0 loaded" in output
+        finally:
+            run_ctl("down", sudo=True)
 
 
 class TestCmdDown:

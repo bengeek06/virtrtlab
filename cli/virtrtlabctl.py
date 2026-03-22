@@ -25,6 +25,7 @@ RUN_DIR = "/run/virtrtlab"
 #   2. repo-relative daemon/virtrtlabd (development layout)
 #   3. virtrtlabd on PATH (installed layout)
 _SCRIPT_DIR = Path(__file__).resolve().parent
+_SCRIPT_PATH = _SCRIPT_DIR / Path(__file__).name
 _DAEMON_RELATIVE = _SCRIPT_DIR.parent / "daemon" / "virtrtlabd"
 DAEMON_BIN: str = os.environ.get(
     "VIRTRTLABD",
@@ -80,6 +81,11 @@ def _run_cmd(
         stderr = exc.stderr.strip() if exc.stderr else ""
         raise VirtrtlabError(
             f"Command failed: {' '.join(cmd)}" + (f": {stderr}" if stderr else ""),
+            exit_code=exit_code,
+        ) from exc
+    except OSError as exc:
+        raise VirtrtlabError(
+            f"Command failed: {' '.join(cmd)}: {exc.strerror or exc}",
             exit_code=exit_code,
         ) from exc
 
@@ -379,6 +385,49 @@ def _write_run_file(
             ) from exc
 
 
+def _spawn_daemon_detached(
+    num_uarts: int, run_dir: str, daemon_bin: str = DAEMON_BIN
+) -> subprocess.Popen[Any]:
+    """Start virtrtlabd detached from the caller's interactive terminal."""
+    return subprocess.Popen(
+        [daemon_bin, "--num-uarts", str(num_uarts), "--run-dir", run_dir],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+
+
+def _launch_daemon(no_sudo: bool, num_uarts: int, run_dir: str) -> int | None:
+    """Launch virtrtlabd while preserving interactive sudo when needed."""
+    pid_file = Path(run_dir) / "daemon.pid"
+    if _sudo_prefix(no_sudo):
+        _run_cmd(
+            [
+                "sudo",
+                sys.executable,
+                str(_SCRIPT_PATH),
+                "__spawn-daemon-detached",
+                "--num-uarts",
+                str(num_uarts),
+                "--run-dir",
+                run_dir,
+                "--pid-file",
+                str(pid_file),
+                "--daemon-bin",
+                DAEMON_BIN,
+            ],
+            capture=True,
+            exit_code=1,
+        )
+        return None
+
+    proc = _spawn_daemon_detached(num_uarts, run_dir)
+    _write_run_file("daemon.pid", str(proc.pid) + "\n", no_sudo, run_dir=run_dir)
+    return proc.pid
+
+
 def _insmod(ko_path: Path, param_name: str, count: int, no_sudo: bool) -> None:
     cmd = _sudo_prefix(no_sudo) + ["insmod", str(ko_path)]
     if param_name:
@@ -666,16 +715,9 @@ def cmd_up(args: argparse.Namespace) -> int:
     _write_run_file("modules.list", "\n".join(all_mod_order) + "\n", no_sudo)
 
     # Start daemon in background if not already running
-    needs_pid_record = False
     if _daemon_pid() is None:
         uart_count = sum(d["count"] for d in profile["devices"] if d["type"] == "uart")
-        subprocess.Popen(
-            _sudo_prefix(no_sudo)
-            + [DAEMON_BIN, "--num-uarts", str(uart_count), "--run-dir", RUN_DIR],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        needs_pid_record = True
+        _launch_daemon(no_sudo, uart_count, RUN_DIR)
 
     # Poll all expected sockets (up to 5 s)
     expected_socks = _expected_sockets(profile)
@@ -684,14 +726,6 @@ def cmd_up(args: argparse.Namespace) -> int:
         # Socket permissions are set by the daemon at bind() time via
         # umask(0117) + chown(root:virtrtlab) on the socket path — no CLI
         # intervention needed.
-
-    # Record daemon PID after sockets confirm it is running.
-    # Popen.pid is the sudo wrapper PID when launched via sudo — scan /proc
-    # for the actual virtrtlabd PID instead.
-    if needs_pid_record:
-        actual_pid = _find_virtrtlabd_pid()
-        if actual_pid is not None:
-            _write_run_file("daemon.pid", str(actual_pid) + "\n", no_sudo)
 
     # GPIO inject and /dev/gpiochipN permissions are handled by udev rules
     # installed at /lib/udev/rules.d/90-virtrtlab.rules — no CLI intervention.
@@ -1015,21 +1049,18 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     run_dir: str = args.run_dir
 
     _run_cmd(_sudo_prefix(no_sudo) + ["mkdir", "-p", run_dir], exit_code=1)
-    proc = subprocess.Popen(
-        _sudo_prefix(no_sudo)
-        + [DAEMON_BIN, "--num-uarts", str(num_uarts), "--run-dir", run_dir],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    actual_pid = _launch_daemon(no_sudo, num_uarts, run_dir)
 
     # Poll uart sockets in the correct run_dir
     expected_socks = [Path(run_dir) / f"uart{i}.sock" for i in range(num_uarts)]
     _poll_sockets(expected_socks)
 
-    # Record actual PID: when launched via sudo, proc.pid is the sudo wrapper
-    # PID, not virtrtlabd's own PID. Scan /proc for the real PID.
-    actual_pid = _find_virtrtlabd_pid() or proc.pid
-    _write_run_file("daemon.pid", str(actual_pid) + "\n", no_sudo, run_dir=run_dir)
+    if actual_pid is None:
+        actual_pid = _daemon_pid(run_dir) or _find_virtrtlabd_pid()
+    if actual_pid is None:
+        raise VirtrtlabError(
+            "daemon started but PID could not be determined", exit_code=3
+        )
 
     if args.json:
         _emit({"state": "running", "pid": actual_pid}, True)
@@ -1132,7 +1163,31 @@ def _build_parser() -> argparse.ArgumentParser:
     daemon_sub.add_parser("status", help="Daemon status")
     p_daemon.set_defaults(func=cmd_daemon)
 
+    # internal
+    p_internal = sub.add_parser("__spawn-daemon-detached", help=argparse.SUPPRESS)
+    p_internal.add_argument("--num-uarts", type=int, metavar="N", required=True)
+    p_internal.add_argument("--run-dir", metavar="DIR", required=True)
+    p_internal.add_argument("--pid-file", metavar="FILE", required=True)
+    p_internal.add_argument("--daemon-bin", metavar="PATH", required=True)
+    p_internal.set_defaults(func=cmd_spawn_daemon_detached)
+
     return parser
+
+
+def cmd_spawn_daemon_detached(args: argparse.Namespace) -> int:
+    try:
+        proc = _spawn_daemon_detached(
+            args.num_uarts,
+            args.run_dir,
+            daemon_bin=args.daemon_bin,
+        )
+        Path(args.pid_file).write_text(str(proc.pid) + "\n")
+        return 0
+    except OSError as exc:
+        raise VirtrtlabError(
+            f"failed to spawn detached daemon helper: {exc.strerror or exc}",
+            exit_code=1,
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
