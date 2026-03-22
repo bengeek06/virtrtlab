@@ -485,7 +485,7 @@ This keeps third-party simulators shell-agnostic and avoids a fragile placeholde
 | `VIRTRTLAB_SIM_RUN_DIR` | absolute path | VirtRTLab runtime directory, e.g. `/run/virtrtlab`. |
 | `VIRTRTLAB_SIM_CONTROL_DIR` | absolute path | Sysfs control root for the target device when available, e.g. `/sys/kernel/virtrtlab/devices/uart0`. |
 | `VIRTRTLAB_SIM_CONFIG` | absolute path | Resolved attachment configuration file written by `virtrtlabctl`. |
-| `VIRTRTLAB_SIM_LOG_DIR` | absolute path | Directory reserved for simulator logs and state files. |
+| `VIRTRTLAB_SIM_LOG_DIR` | absolute path | Directory reserved for simulator log files (e.g. `stdout.log`, `stderr.log`). |
 
 Optional variables reserved for later use:
 
