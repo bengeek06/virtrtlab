@@ -1,0 +1,357 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "auth: sudo timestamp",
+            "type": "shell",
+            "command": "sudo",
+            "args": [
+                "-v"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "reveal": "always",
+                "focus": true,
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "check: dependencies",
+            "type": "shell",
+            "command": "make",
+            "args": [
+                "check"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build"
+        },
+        {
+            "label": "build: kernel modules",
+            "type": "shell",
+            "command": "make",
+            "args": [
+                "-C",
+                "kernel"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build",
+            "problemMatcher": [
+                "$gcc"
+            ]
+        },
+        {
+            "label": "build: daemon",
+            "type": "shell",
+            "command": "make",
+            "args": [
+                "-C",
+                "daemon"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build",
+            "problemMatcher": [
+                "$gcc"
+            ]
+        },
+        {
+            "label": "build: daemon (debug)",
+            "type": "shell",
+            "command": "make",
+            "args": [
+                "-C",
+                "daemon",
+                "clean",
+                "all",
+                "CFLAGS=-Wall -Wextra -O0 -g3 -std=gnu11"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build",
+            "problemMatcher": [
+                "$gcc"
+            ]
+        },
+        {
+            "label": "build: all",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "build: kernel modules",
+                "build: daemon"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "clean: all",
+            "type": "shell",
+            "command": "make",
+            "args": [
+                "clean"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build"
+        },
+        {
+            "label": "lab: down",
+            "type": "shell",
+            "command": "sudo",
+            "args": [
+                "-n",
+                "-E",
+                "/usr/bin/python3",
+                "cli/virtrtlabctl.py",
+                "--no-sudo",
+                "down"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            }
+        },
+        {
+            "label": "lab: up (uart=1 gpio=1)",
+            "type": "shell",
+            "command": "sudo",
+            "args": [
+                "-n",
+                "-E",
+                "/usr/bin/python3",
+                "cli/virtrtlabctl.py",
+                "--no-sudo",
+                "up",
+                "--uart",
+                "1",
+                "--gpio",
+                "1"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "build: all"
+            ]
+        },
+        {
+            "label": "kernel: load core",
+            "type": "shell",
+            "command": "sudo",
+            "args": [
+                "-n",
+                "-E",
+                "/usr/sbin/insmod",
+                "${workspaceFolder}/kernel/virtrtlab_core.ko"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            }
+        },
+        {
+            "label": "kernel: load uart (1)",
+            "type": "shell",
+            "command": "sudo",
+            "args": [
+                "-n",
+                "-E",
+                "/usr/sbin/insmod",
+                "${workspaceFolder}/kernel/virtrtlab_uart.ko",
+                "num_uart_devices=1"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            }
+        },
+        {
+            "label": "kernel: load gpio (1)",
+            "type": "shell",
+            "command": "sudo",
+            "args": [
+                "-n",
+                "-E",
+                "/usr/sbin/insmod",
+                "${workspaceFolder}/kernel/virtrtlab_gpio.ko",
+                "num_gpio_devs=1"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            }
+        },
+        {
+            "label": "kernel: prepare daemon debug",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "build: kernel modules",
+                "lab: down",
+                "kernel: load core",
+                "kernel: load uart (1)"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "daemon: prepare debug",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "build: daemon (debug)",
+                "kernel: prepare daemon debug"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "run: daemon",
+            "type": "shell",
+            "command": "sudo",
+            "args": [
+                "-n",
+                "-E",
+                "${workspaceFolder}/daemon/virtrtlabd",
+                "--num-uarts",
+                "1",
+                "--run-dir",
+                "/run/virtrtlab"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/daemon"
+            },
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "build: daemon",
+                "kernel: prepare daemon debug"
+            ],
+            "isBackground": true,
+            "problemMatcher": []
+        },
+        {
+            "label": "stop: daemon",
+            "type": "shell",
+            "command": "sudo",
+            "args": [
+                "-n",
+                "-E",
+                "/usr/bin/python3",
+                "${workspaceFolder}/cli/virtrtlabctl.py",
+                "--no-sudo",
+                "daemon",
+                "stop"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            }
+        },
+        {
+            "label": "test: cli",
+            "type": "shell",
+            "command": "python3",
+            "args": [
+                "-m",
+                "pytest",
+                "-c",
+                "pytest.ini",
+                "tests/cli"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "test"
+        },
+        {
+            "label": "test: daemon",
+            "type": "shell",
+            "command": "python3",
+            "args": [
+                "-m",
+                "pytest",
+                "-c",
+                "pytest.ini",
+                "tests/daemon"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "test"
+        },
+        {
+            "label": "test: kernel",
+            "type": "shell",
+            "command": "python3",
+            "args": [
+                "-m",
+                "pytest",
+                "-c",
+                "pytest.ini",
+                "tests/kernel"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "test"
+        },
+        {
+            "label": "test: install",
+            "type": "shell",
+            "command": "python3",
+            "args": [
+                "-m",
+                "pytest",
+                "-c",
+                "pytest.ini",
+                "tests/install"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "test"
+        },
+        {
+            "label": "test: all",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "test: cli",
+                "test: daemon",
+                "test: kernel",
+                "test: install"
+            ],
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "type": "cppbuild",
+            "label": "C/C++: gcc build active file",
+            "command": "/usr/bin/gcc",
+            "args": [
+                "-fdiagnostics-color=always",
+                "-g",
+                "${file}",
+                "-o",
+                "${fileDirname}/${fileBasenameNoExtension}"
+            ],
+            "options": {
+                "cwd": "${fileDirname}"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "detail": "Task generated by Debugger."
+        }
+    ]
+}
