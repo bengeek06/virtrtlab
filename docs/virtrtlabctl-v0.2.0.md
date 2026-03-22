@@ -33,6 +33,21 @@ When `--json` is used:
 - failures must use the stable error envelope `{"error": "...", "code": N}`
 - human-oriented aligned text is suppressed from stdout
 
+Human-readable mode contract:
+
+- human-readable output is intended for operators, not for long-term script parsing
+- successful command results go to stdout
+- command errors and diagnostics go to stderr
+- no ANSI color or terminal-control sequences are required in `v0.2.0`
+- status words remain lowercase in field values: `attached`, `starting`, `running`, `stopping`, `stopped`, `failed`
+- the only prefixed message markers standardized in `v0.2.0` are `[ok]`, `[info]`, `[warn]`, and `[error]`
+- messages should use stable imperative or past-tense wording such as `attached`, `started`, `stopped`, `detached`, `failed to start`
+
+Human-readable compatibility guidance:
+
+- JSON is the scripting contract; human-readable output may evolve cosmetically
+- nevertheless, command examples and golden tests may rely on stable field labels, marker words, and column order inside `v0.2.x`
+
 ### `sim list`
 
 Lists catalog entries visible after precedence resolution.
@@ -47,8 +62,16 @@ Default output example:
 
 ```text
 loopback             supports=uart         Echo bytes back to the same VirtRTLab link
+test-stub            supports=uart         Deterministic simulator process for VirtRTLab CI and CLI validation
 ublox-m8-nmea        supports=uart         Simulated u-blox GPS speaking NMEA
 ```
+
+Column contract:
+
+- output is one simulator per line
+- columns appear in this order: `name`, `supports=...`, summary text
+- alignment spaces are cosmetic and may vary
+- the `supports=` key spelling is stable within `v0.2.x`
 
 Verbose output additionally shows the source file that defined each entry and whether it overrides a lower-precedence catalog definition.
 
@@ -74,6 +97,7 @@ Displays full metadata for one simulator entry.
 
 ```sh
 virtrtlabctl sim inspect loopback
+virtrtlabctl sim inspect test-stub
 ```
 
 Example output:
@@ -88,6 +112,12 @@ restart policy  never
 parameters:
   delay_ms      type=u32   required=no   default=0
 ```
+
+Field-order contract:
+
+- labeled lines appear in this order: `name`, `supports`, `summary`, `catalog file`, `restart policy`
+- the `parameters:` heading is lowercase and ends with `:`
+- each parameter line lists `name`, `type=...`, `required=...`, and `default=...` in that order
 
 JSON output example:
 
@@ -111,12 +141,29 @@ JSON output example:
 }
 ```
 
+Illustrative `test-stub` output:
+
+```text
+name            test-stub
+supports        uart
+summary         Deterministic simulator process for VirtRTLab CI and CLI validation
+catalog file    /usr/share/virtrtlab/simulators.d/test-stub.toml
+restart policy  never
+
+parameters:
+  mode              type=string required=no default=run
+  startup_delay_ms  type=u32    required=no default=0
+  runtime_ms        type=u32    required=no default=0
+  exit_code         type=u32    required=no default=1
+```
+
 ### `sim attach`
 
 Attaches a catalog simulator to one VirtRTLab device without starting it.
 
 ```sh
 virtrtlabctl sim attach uart0 loopback
+virtrtlabctl sim attach uart0 test-stub --set mode=crash --set runtime_ms=50
 virtrtlabctl sim attach uart1 ublox-m8-nmea --auto-start --set scenario_file=./scenarios/static-fix.toml
 virtrtlabctl sim attach uart1 gps --set profile='{"boot_ms":20,"scenario":{"mode":"urban"}}'
 virtrtlabctl sim attach uart1 gps --set profile.scenario.mode=urban
@@ -152,6 +199,11 @@ Human-readable success example:
 [ok] attached loopback to uart0
 ```
 
+Success-message contract:
+
+- successful attach uses the wording `[ok] attached <simulator> to <device>`
+- replacement of an existing stopped or failed attachment may emit an additional `[info]` line before the final success line
+
 JSON output example:
 
 ```json
@@ -184,6 +236,11 @@ Human-readable success example:
 [ok] detached simulator from uart0
 ```
 
+Success-message contract:
+
+- successful detach uses the wording `[ok] detached simulator from <device>`
+- detach-triggered stop diagnostics, if any, precede the final detach line
+
 JSON output example:
 
 ```json
@@ -213,6 +270,11 @@ Human-readable success example:
 ```text
 [ok] started loopback on uart0
 ```
+
+Success-message contract:
+
+- successful start uses the wording `[ok] started <simulator> on <device>`
+- if the simulator reaches `failed` during immediate launch checks, the human-readable error should start with `[error] failed to start <simulator> on <device>:`
 
 JSON output example:
 
@@ -250,6 +312,11 @@ Human-readable success example:
 [ok] stopped simulator on uart0
 ```
 
+Success-message contract:
+
+- successful stop uses the wording `[ok] stopped simulator on <device>`
+- force-kill fallback may emit one preceding `[warn]` line before the final success line
+
 JSON output example:
 
 ```json
@@ -278,6 +345,14 @@ uart0   simulator=loopback       state=running  pid=14523  auto_start=yes
 uart1   simulator=ublox-m8-nmea  state=attached pid=-      auto_start=no
 ```
 
+Aggregate-column contract:
+
+- output is one attachment per line
+- columns appear in this order: device name, `simulator=...`, `state=...`, `pid=...`, `auto_start=...`
+- `pid=-` is used when no live process exists
+- `auto_start` values are rendered as `yes` or `no`
+- alignment spaces are cosmetic and may vary
+
 Detailed single-device output example:
 
 ```text
@@ -289,6 +364,12 @@ auto_start      yes
 config file     /run/virtrtlab/simulators/uart0/config.toml
 log dir         /run/virtrtlab/simulators/uart0/logs
 ```
+
+Detailed-field contract:
+
+- labeled lines appear in this order: `device`, `simulator`, `state`, `pid`, `auto_start`, `config file`, `log dir`
+- when present for failure cases, `last error`, `last exit code`, and `stopped at` are appended after `log dir` in that order
+- labels are lowercase and space-separated exactly as shown
 
 Runtime state is stored under `/run/virtrtlab/simulators/`; see [simulator-contract-v0.2.0.md](simulator-contract-v0.2.0.md) for the exact layout.
 
@@ -366,6 +447,12 @@ Default behaviour reads the attachment stdout log. `--stderr` selects the stderr
 
 `sim logs` is intentionally stream-oriented. In `v0.2.0`, `--json` is not required for `sim logs`; JSON mode is reserved for non-streaming `sim` subcommands.
 
+Human-readable stream contract:
+
+- log payload lines are emitted verbatim, without `[ok]` or `[info]` prefixes
+- command-level errors, such as missing attachment state or missing log file, are emitted as normal CLI errors rather than mixed into the log stream
+- `--tail N` preserves original log line ordering
+
 Because logs live under `/run`, they are ephemeral.
 After `sim detach`, `down`, reboot, or manual runtime cleanup, `sim logs <device>` may legitimately return a not-found error.
 
@@ -398,6 +485,11 @@ description = "Delay before echoing received bytes back to the AUT"
 - `sim inspect` must expose the declared restart policy
 - `sim status <device>` must expose the effective restart policy from runtime state
 - in `v0.2.0`, `on-failure` is informational only and does not cause automatic restart by itself
+
+`test-stub` note:
+
+- `test-stub` is the preferred target for CLI golden tests, crash tests, and log-capture tests
+- `loopback` remains the preferred target for end-to-end socket smoke tests
 
 ### Exit codes for `sim` commands
 
@@ -510,6 +602,12 @@ Illustrative example:
 [error] failed to start gps on uart1: socket connect failed
 [info] simulator startup is partial; inspect with `virtrtlabctl sim status`
 ```
+
+Partial-startup wording contract:
+
+- successful lifecycle events during `up --config` reuse the same `[ok] attached ...` and `[ok] started ...` wording as direct `sim` subcommands
+- attachment launch failure uses `[error] failed to start <simulator> on <device>: <reason>`
+- partial overall outcome is summarized by one trailing `[info]` line
 
 Illustrative JSON failure shape:
 

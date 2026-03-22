@@ -894,6 +894,120 @@ default = 0
 description = "Delay before echoing received bytes back to the AUT"
 ```
 
+### 6.7 Reference CI stub simulator
+
+`test-stub` is the reference deterministic simulator intended for CLI, lifecycle, and CI validation.
+
+Unlike `loopback`, it is not meant to model a realistic peripheral protocol.
+Its role is to make simulator process behaviour easy to control from tests.
+
+#### Scope
+
+In `v0.2.0`, `test-stub` may support `uart` attachments only.
+
+It should still connect to `VIRTRTLAB_SIM_SOCKET` when operating in steady-state `run` mode so that attachment startup exercises the same socket-path contract as ordinary simulators.
+
+#### Required behaviour
+
+The reference `test-stub` simulator shall:
+
+- accept the same environment/config contract as any other managed simulator
+- optionally emit one configured line to stdout and one configured line to stderr during startup
+- optionally delay startup by a bounded number of milliseconds
+- either stay alive, exit immediately with a configured code, or crash after a bounded runtime depending on configuration
+- terminate cleanly on `SIGTERM` by default
+
+#### Initial parameter set
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `mode` | `string` | `run` | One of `run`, `fail`, `crash` |
+| `startup_delay_ms` | `u32` | `0` | Delay before the simulator decides whether to run or fail |
+| `runtime_ms` | `u32` | `0` | In `run` or `crash` mode, `0` means run until signaled; non-zero means exit after the delay |
+| `exit_code` | `u32` | `1` | Exit status used in `fail` or timed `crash` mode |
+| `stdout_line` | `string` | `""` | Optional startup line written once to stdout |
+| `stderr_line` | `string` | `""` | Optional startup line written once to stderr |
+| `ignore_sigterm` | `bool` | `false` | When `true`, ignore the first graceful stop signal so tests can exercise force-kill fallback |
+
+Mode semantics:
+
+| Mode | Expected behaviour |
+|---|---|
+| `run` | connect to the socket, emit configured logs, and stay alive until signaled or until `runtime_ms` elapses |
+| `fail` | emit configured logs and exit non-zero during startup without entering durable `running` state |
+| `crash` | enter `running`, then exit with `exit_code` after `runtime_ms` or equivalent bounded delay |
+
+#### Test value
+
+`test-stub` exists primarily to support:
+
+- deterministic `starting -> running` and `starting -> failed` coverage
+- deterministic `running -> failed` crash coverage
+- stdout/stderr log-capture validation
+- stop-timeout and force-kill testing via `ignore_sigterm`
+- partial-startup profile tests without relying on protocol-specific simulators
+
+#### Example built-in entry
+
+```toml
+api_version = 1
+name = "test-stub"
+summary = "Deterministic simulator process for VirtRTLab CI and CLI validation"
+description = "Reference stub used to exercise lifecycle, logs, and error handling without protocol realism"
+exec = ["/usr/libexec/virtrtlab/sim-test-stub"]
+supports = ["uart"]
+restart_policy = "never"
+
+[[parameters]]
+name = "mode"
+type = "string"
+required = false
+default = "run"
+description = "Lifecycle mode: run, fail, or crash"
+
+[[parameters]]
+name = "startup_delay_ms"
+type = "u32"
+required = false
+default = 0
+description = "Delay before startup succeeds or fails"
+
+[[parameters]]
+name = "runtime_ms"
+type = "u32"
+required = false
+default = 0
+description = "Runtime duration before timed exit; 0 means run until signaled"
+
+[[parameters]]
+name = "exit_code"
+type = "u32"
+required = false
+default = 1
+description = "Exit code used in fail or crash mode"
+
+[[parameters]]
+name = "stdout_line"
+type = "string"
+required = false
+default = ""
+description = "Optional startup line written once to stdout"
+
+[[parameters]]
+name = "stderr_line"
+type = "string"
+required = false
+default = ""
+description = "Optional startup line written once to stderr"
+
+[[parameters]]
+name = "ignore_sigterm"
+type = "bool"
+required = false
+default = false
+description = "Ignore the first graceful stop signal so tests can exercise force-kill fallback"
+```
+
 ---
 
 ## 7. CLI surface
@@ -940,6 +1054,12 @@ Machine-readable contract:
 - `virtrtlabctl --json sim inspect <name>` returns one JSON object
 - field names must match catalog semantics directly and remain stable across `v0.2.x`
 - unknown optional catalog fields may be added later but existing fields must not change type
+
+Human-readable contract:
+
+- labeled lines use lowercase labels
+- field order remains stable within `v0.2.x` to support documentation and golden tests
+- alignment whitespace is cosmetic only and not semantically relevant
 
 ### 7.4 `sim attach`
 
@@ -1026,6 +1146,12 @@ Machine-readable contract:
 - `virtrtlabctl --json sim status <device>` returns the per-device state file shape defined in section `5.6.1`
 - human-readable output may evolve cosmetically, but the JSON schema is part of the compatibility contract
 
+Human-readable contract:
+
+- aggregate output uses one attachment per line with stable field order
+- detailed output uses one labeled field per line with stable label names
+- absence of a PID is rendered as `pid=-` in aggregate form
+
 ### 7.9 `sim logs`
 
 Shows logs for the simulator attached to one device.
@@ -1072,6 +1198,12 @@ Rules:
 - the `error` string is for operators and logs
 - the numeric `code` is the scripting contract
 - the same numeric meaning must be preserved in human and JSON modes
+
+Human-readable error wording guidance:
+
+- errors should start with `[error]` in default human mode when a command emits a one-line failure summary
+- state-conflict wording should name both the device and current state when available
+- not-found wording should identify the missing device, simulator, or attachment explicitly
 
 ### 7.11 Reference CI validation scenarios
 

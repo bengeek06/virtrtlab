@@ -74,6 +74,7 @@ Implementation guidance:
 - Run the CLI as a subprocess exactly as CI will
 - Keep expected outputs in `tests/fixtures/`
 - Prefer golden JSON fixtures for `sim list`, `sim inspect`, and `sim status`
+- Prefer golden human-readable fixtures for the stable column order and field labels of `sim list`, `sim inspect`, and `sim status`
 - Race-oriented tests should assert coherent observable outcomes, not scheduler-specific ordering
 
 Recommended `v0.2.0` simulator test matrix:
@@ -82,6 +83,9 @@ Recommended `v0.2.0` simulator test matrix:
 - `sim start` transitions to `running` with non-null `pid`
 - `sim stop` transitions to `stopped` with null `pid`
 - unexpected simulator exit transitions to `failed`
+- `test-stub mode=fail` exercises deterministic startup failure
+- `test-stub mode=crash` exercises deterministic post-start crash handling
+- `test-stub ignore_sigterm=true` exercises stop timeout and force-kill fallback
 - `restart_policy = on-failure` remains informational only in `v0.2.0`; no autonomous restart occurs
 - invalid `--set` syntax returns exit code `2`
 - invalid `--set` type or integer overflow returns exit code `2`
@@ -90,6 +94,8 @@ Recommended `v0.2.0` simulator test matrix:
 - deleting `/run/virtrtlab/simulators/state.json` forces aggregate regeneration on the next status query
 - deleting `/run/virtrtlab/simulators/` makes aggregate status empty and per-device status not found
 - `up --config` with mixed auto-start outcomes returns non-zero and exposes partial startup clearly
+- human-readable success and error prefixes stay within the `[ok]`, `[info]`, `[warn]`, `[error]` set
+- aggregate status keeps field order `device`, `simulator=`, `state=`, `pid=`, `auto_start=`
 
 ### `tests/helpers/`
 
@@ -113,6 +119,11 @@ For the simulator contract introduced in `v0.2.0`:
 
 1. `userspace-fast` should cover catalog parsing, `--json` stability, `--set` validation, and synthetic lifecycle tests with stub simulators
 2. integration jobs should cover real socket-connected simulator processes, crash handling, log capture, and partial `up --config` startup behaviour
+
+Recommended simulator split:
+
+1. use `test-stub` for deterministic lifecycle, log, and failure-path tests
+2. use `loopback` for the simplest real socket-connected smoke path
 
 Hosted GitHub runners are fine for userspace-only checks. Kernel module tests should run in a privileged VM or dedicated self-hosted runner so module loading, `/sys/kernel/virtrtlab/`, and device nodes behave predictably.
 
