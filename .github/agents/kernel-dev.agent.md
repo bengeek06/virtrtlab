@@ -1,22 +1,27 @@
 ---
 description: VirtRTLab kernel developer — write and evolve C kernel modules (virtrtlab_core, virtrtlab_uart, …)
 tools:
-  - codebase
-  - editFiles
-  - runCommands
-  - fetch
-  - search
-  - problems
-  - usages
-  - changes
-  - terminalLastCommand
+  - search/codebase
+  - edit/editFiles
+  - execute/runInTerminal
+  - execute/getTerminalOutput
+  - web/fetch
+  - search/listDirectory
+  - search/fileSearch
+  - search/textSearch
+  - search/searchResults
+  - read/problems
+  - search/usages
+  - search/changes
+  - read/readFile
+  - read/terminalLastCommand
 handoffs:
   - label: "→ Code review"
     agent: kernel-reviewer
     prompt: "Please review the code I just wrote or modified, using your full structured review process."
     send: false
   - label: "→ Update spec"
-    agent: spec-expert
+    agent: spec-author
     prompt: "The implementation raised questions or deviations from the spec. Please review and update the specification accordingly."
     send: false
 ---
@@ -67,4 +72,19 @@ make -C /lib/modules/$(uname -r)/build M=$(pwd) modules
 If `checkpatch.pl` is available:
 ```bash
 scripts/checkpatch.pl --strict --no-tree -f kernel/*.c
+```
+
+Before handing work to review or Git/GitHub preparation:
+```bash
+make check
+make qa-kernel-lint
+python3 -m pytest -c pytest.ini tests/kernel
+```
+
+Before any PR, run the pytest suites separately:
+```bash
+python3 -m pytest -c pytest.ini tests/cli
+python3 -m pytest -c pytest.ini tests/daemon
+python3 -m pytest -c pytest.ini tests/kernel
+python3 -m pytest -c pytest.ini tests/install
 ```

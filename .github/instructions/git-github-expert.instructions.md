@@ -61,11 +61,26 @@ Chaque issue doit avoir :
 
 ## Préparation des Pull Requests
 
+Avant tout `git push` destiné à partage, revue, ou PR :
+1. Vérifier que la branche est à jour avec `main`
+2. Lancer `make check`
+3. Lancer la QA locale pertinente :
+  - `make qa` pour le CLI et le daemon
+  - `make qa-kernel-lint` si `kernel/**` est touché
+4. Lancer les suites pytest séparément :
+  - `python3 -m pytest -c pytest.ini tests/cli`
+  - `python3 -m pytest -c pytest.ini tests/daemon`
+  - `python3 -m pytest -c pytest.ini tests/kernel`
+  - `python3 -m pytest -c pytest.ini tests/install`
+5. Ne pousser la branche que si toutes ces commandes passent
+
 Avant de créer une PR :
 1. Vérifier que la branche est à jour avec `main`
-2. Squasher les commits WIP en commits propres (conventional commits)
-3. S'assurer que le build passe (`make` dans `kernel/`)
-4. Lier la PR à l'issue correspondante (`Closes #N`)
+2. Vérifier que `make check` passe
+3. Vérifier que la QA locale pertinente passe (`make qa`, `make qa-kernel-lint` si `kernel/**` est touché)
+4. Vérifier que les suites pytest séparées passent (`tests/cli`, `tests/daemon`, `tests/kernel`, `tests/install`)
+5. Squasher les commits WIP en commits propres (conventional commits)
+6. Lier la PR à l'issue correspondante (`Closes #N`)
 
 Template de description de PR :
 ```markdown
@@ -79,7 +94,13 @@ Closes #N
 
 ## Tests effectués
 <!-- Comment as-tu validé le changement ? -->
-- [ ] `make` passe sans erreur
+- [ ] `make check` passe sans erreur
+- [ ] `make qa` passe si le CLI ou le daemon sont touchés
+- [ ] `make qa-kernel-lint` passe si `kernel/**` est touché
+- [ ] `python3 -m pytest -c pytest.ini tests/cli` passe
+- [ ] `python3 -m pytest -c pytest.ini tests/daemon` passe
+- [ ] `python3 -m pytest -c pytest.ini tests/kernel` passe
+- [ ] `python3 -m pytest -c pytest.ini tests/install` passe
 - [ ] Module charge/décharge sans oops (`dmesg` propre)
 - [ ] `checkpatch.pl --strict` sans erreur
 
@@ -94,6 +115,8 @@ Closes #N
 - **Jamais de force-push sur `main`**
 - Le merge n'est autorisé qu'après :
   - Au moins 1 ACK du kernel-reviewer
+  - QA locale obligatoire déjà passée avant push et PR
+  - Suite de tests locale passée avant PR
   - Build CI vert
   - Pas de discussion non résolue
 

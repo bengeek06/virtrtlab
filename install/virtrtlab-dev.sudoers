@@ -1,6 +1,9 @@
-# VirtRTLab — allow group members to load/unload modules without password
-# Used by kernel test suite (insmod/rmmod directly, without daemon)
+# VirtRTLab — allow group members to use development/CI privileged commands
+# Used by the kernel test suite and local VS Code tasks.
 # installed by: make install-dev  (NOT make install)
+#
+# @REPO_ROOT@ is replaced at install time with the absolute path of the local
+# checkout that invoked `make install-dev`.
 
 %virtrtlab ALL=(root) NOPASSWD: /sbin/modprobe virtrtlab_core
 %virtrtlab ALL=(root) NOPASSWD: /sbin/modprobe virtrtlab_uart
@@ -8,4 +11,11 @@
 %virtrtlab ALL=(root) NOPASSWD: /sbin/rmmod virtrtlab_core
 %virtrtlab ALL=(root) NOPASSWD: /sbin/rmmod virtrtlab_uart
 %virtrtlab ALL=(root) NOPASSWD: /sbin/rmmod virtrtlab_gpio
+%virtrtlab ALL=(root) NOPASSWD: /usr/bin/python3 @REPO_ROOT@/cli/virtrtlabctl.py --no-sudo down
+%virtrtlab ALL=(root) NOPASSWD: /usr/bin/python3 @REPO_ROOT@/cli/virtrtlabctl.py --no-sudo up --uart 1 --gpio 1
+%virtrtlab ALL=(root) NOPASSWD: /usr/bin/python3 @REPO_ROOT@/cli/virtrtlabctl.py --no-sudo daemon stop
+%virtrtlab ALL=(root) NOPASSWD: /usr/sbin/insmod @REPO_ROOT@/kernel/virtrtlab_core.ko
+%virtrtlab ALL=(root) NOPASSWD: /usr/sbin/insmod @REPO_ROOT@/kernel/virtrtlab_uart.ko num_uart_devices=1
+%virtrtlab ALL=(root) NOPASSWD: /usr/sbin/insmod @REPO_ROOT@/kernel/virtrtlab_gpio.ko num_gpio_devs=1
+%virtrtlab ALL=(root) NOPASSWD: @REPO_ROOT@/daemon/virtrtlabd --num-uarts 1 --run-dir /run/virtrtlab
 %virtrtlab ALL=(root) NOPASSWD: /usr/sbin/dmesg

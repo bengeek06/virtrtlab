@@ -1,0 +1,143 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "CLI: debug virtrtlabctl",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/cli/virtrtlabctl.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/cli"
+      },
+      "args": [
+        "status"
+      ]
+    },
+    {
+      "name": "Tests: debug CLI suite",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/cli"
+      },
+      "args": [
+        "-c",
+        "pytest.ini",
+        "tests/cli"
+      ]
+    },
+    {
+      "name": "Daemon: debug virtrtlabd",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/daemon/virtrtlabd",
+      "args": [
+        "--num-uarts",
+        "1",
+        "--run-dir",
+        "${workspaceFolder}/.vscode/virtrtlab-run"
+      ],
+      "cwd": "${workspaceFolder}/daemon",
+      "preLaunchTask": "daemon: prepare debug",
+      "MIMode": "gdb",
+      "miDebuggerPath": "/usr/bin/gdb",
+      "stopAtEntry": true,
+      "externalConsole": false,
+      "setupCommands": [
+        {
+          "description": "Enable GDB pretty-printing",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ]
+    },
+    {
+      "name": "Daemon: debug virtrtlabd (sudo, needs NOPASSWD)",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/daemon/virtrtlabd",
+      "args": [
+        "--num-uarts",
+        "1",
+        "--run-dir",
+        "/run/virtrtlab"
+      ],
+      "cwd": "${workspaceFolder}/daemon",
+      "preLaunchTask": "daemon: prepare debug",
+      "MIMode": "gdb",
+      "miDebuggerPath": "/usr/bin/gdb",
+      "stopAtEntry": true,
+      "externalConsole": false,
+      "setupCommands": [
+        {
+          "description": "Enable GDB pretty-printing",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ],
+      "pipeTransport": {
+        "pipeProgram": "sudo",
+        "pipeArgs": [
+          "-E"
+        ],
+        "debuggerPath": "/usr/bin/gdb",
+        "pipeCwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "name": "Kernel: attach via KGDB",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${input:kgdbVmlinux}",
+      "cwd": "${workspaceFolder}",
+      "MIMode": "gdb",
+      "miDebuggerPath": "/usr/bin/gdb",
+      "miDebuggerServerAddress": "${input:kgdbEndpoint}",
+      "stopAtEntry": false,
+      "externalConsole": false,
+      "setupCommands": [
+        {
+          "description": "Enable GDB pretty-printing",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ]
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Lab: build then bring up",
+      "preLaunchTask": "lab: up (uart=1 gpio=1)",
+      "configurations": [
+        "CLI: debug virtrtlabctl"
+      ]
+    },
+    {
+      "name": "Daemon: prepare kernel then debug",
+      "configurations": [
+        "Daemon: debug virtrtlabd"
+      ]
+    }
+  ],
+  "inputs": [
+    {
+      "id": "kgdbVmlinux",
+      "type": "promptString",
+      "description": "Absolute path to the vmlinux file that matches the running kernel",
+      "default": "/path/to/vmlinux"
+    },
+    {
+      "id": "kgdbEndpoint",
+      "type": "promptString",
+      "description": "KGDB remote endpoint, for example localhost:1234 or /dev/ttyUSB0",
+      "default": "localhost:1234"
+    }
+  ]
+}
