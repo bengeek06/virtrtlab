@@ -567,17 +567,17 @@ Canonical `v0.2.0` layout:
 ```text
 /run/virtrtlab/
 └── simulators/
-		├── state.json
-		├── uart0/
-		│   ├── attachment.toml
-		│   ├── config.toml
-		│   ├── pid
-		│   ├── state.json
-		│   └── logs/
-		│       ├── stdout.log
-		│       └── stderr.log
-		└── uart1/
-				└── ...
+    ├── state.json
+    ├── uart0/
+    │   ├── attachment.toml
+    │   ├── config.toml
+    │   ├── pid
+    │   ├── state.json
+    │   └── logs/
+    │       ├── stdout.log
+    │       └── stderr.log
+    └── uart1/
+        └── ...
 ```
 
 File semantics:
