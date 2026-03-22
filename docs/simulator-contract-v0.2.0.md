@@ -1060,6 +1060,7 @@ Human-readable contract:
 - labeled lines use lowercase labels
 - field order remains stable within `v0.2.x` to support documentation and golden tests
 - alignment whitespace is cosmetic only and not semantically relevant
+- recommended golden fixtures should compare semantic field order and values, not raw padding width
 
 ### 7.4 `sim attach`
 
@@ -1151,6 +1152,7 @@ Human-readable contract:
 - aggregate output uses one attachment per line with stable field order
 - detailed output uses one labeled field per line with stable label names
 - absence of a PID is rendered as `pid=-` in aggregate form
+- recommended golden fixtures may normalize dynamic PID and timestamp values, but must keep state labels and field names exact
 
 ### 7.9 `sim logs`
 

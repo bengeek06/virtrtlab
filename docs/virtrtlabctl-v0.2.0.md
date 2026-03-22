@@ -48,6 +48,12 @@ Human-readable compatibility guidance:
 - JSON is the scripting contract; human-readable output may evolve cosmetically
 - nevertheless, command examples and golden tests may rely on stable field labels, marker words, and column order inside `v0.2.x`
 
+Golden-fixture guidance:
+
+- golden fixtures should exist for both human-readable and JSON forms of `sim list`, `sim inspect`, and `sim status`
+- fixture comparisons should treat alignment whitespace as cosmetic in human-readable mode
+- fixture comparisons must remain strict on field names, field order, marker words, and JSON key presence
+
 ### `sim list`
 
 Lists catalog entries visible after precedence resolution.
@@ -90,6 +96,11 @@ JSON output example:
   ]
 }
 ```
+
+Golden-fixture expectation:
+
+- the human-readable golden file for `sim list` should compare normalized lines, not raw spacing width
+- the JSON golden file for `sim list` should compare parsed JSON objects after stable key ordering
 
 ### `sim inspect`
 
@@ -156,6 +167,11 @@ parameters:
   runtime_ms        type=u32    required=no default=0
   exit_code         type=u32    required=no default=1
 ```
+
+Golden-fixture expectation:
+
+- `sim inspect` human-readable fixtures must preserve label order and parameter row order
+- `sim inspect` JSON fixtures must preserve parameter array order as emitted by the command
 
 ### `sim attach`
 
@@ -423,6 +439,12 @@ JSON output example for `sim status` without a device argument:
 }
 ```
 
+Golden-fixture expectation:
+
+- aggregate `sim status` human-readable fixtures must preserve row order chosen by the command; the recommended order is lexical by device name
+- detailed `sim status <device>` human-readable fixtures must preserve field order exactly
+- per-device JSON fixtures must normalize only dynamic runtime values such as timestamps, PIDs, and instance IDs before comparison
+
 Consistency rules:
 
 - `sim status <device>` must return one coherent per-device snapshot
@@ -608,6 +630,76 @@ Partial-startup wording contract:
 - successful lifecycle events during `up --config` reuse the same `[ok] attached ...` and `[ok] started ...` wording as direct `sim` subcommands
 - attachment launch failure uses `[error] failed to start <simulator> on <device>: <reason>`
 - partial overall outcome is summarized by one trailing `[info]` line
+
+### Golden fixtures
+
+Recommended fixture layout under `tests/fixtures/`:
+
+```text
+tests/fixtures/
+└── cli/
+  └── sim/
+    ├── list.default.txt
+    ├── list.default.json
+    ├── list.verbose.txt
+    ├── list.verbose.json
+    ├── inspect.loopback.txt
+    ├── inspect.loopback.json
+    ├── inspect.test-stub.txt
+    ├── inspect.test-stub.json
+    ├── status.aggregate.attached.txt
+    ├── status.aggregate.attached.json
+    ├── status.aggregate.running.txt
+    ├── status.aggregate.running.json
+    ├── status.device.running.txt
+    ├── status.device.running.json
+    ├── status.device.failed.txt
+    └── status.device.failed.json
+```
+
+Naming contract:
+
+- `<command>.<variant>.<ext>` for `sim list`
+- `inspect.<simulator>.<ext>` for `sim inspect`
+- `status.aggregate.<variant>.<ext>` and `status.device.<variant>.<ext>` for `sim status`
+- `.txt` stores human-readable stdout
+- `.json` stores canonical JSON output
+
+Normalization rules for fixture comparison:
+
+- human-readable fixtures normalize trailing spaces and final trailing newline only
+- alignment runs of spaces may be collapsed for commands documented as column-aligned output: `sim list` and aggregate `sim status`
+- labeled-field outputs such as `sim inspect` and detailed `sim status <device>` must preserve labels, order, and values, but may ignore padding width between label and value
+- JSON fixtures must be compared structurally after JSON parsing, not as raw text
+- dynamic values in JSON such as `pid`, `instance_id`, `created_at`, `started_at`, `stopped_at`, and `updated_at` should be replaced in the test harness with deterministic placeholders before fixture comparison
+
+Recommended placeholders for normalized JSON comparisons:
+
+| Dynamic field | Placeholder |
+|---|---|
+| `pid` | `12345` |
+| `instance_id` | `INSTANCE_ID` |
+| `created_at` | `TIMESTAMP` |
+| `started_at` | `TIMESTAMP` |
+| `stopped_at` | `TIMESTAMP` |
+| `updated_at` | `TIMESTAMP` |
+
+Recommended placeholders for normalized human-readable comparisons:
+
+| Dynamic fragment | Placeholder |
+|---|---|
+| `pid=14523` | `pid=PID` |
+| standalone PID field value | `PID` |
+| timestamp values | `TIMESTAMP` |
+
+Non-normalized fields:
+
+- simulator names
+- device names
+- field labels
+- marker words such as `[ok]` and `[error]`
+- enum values such as `running` or `failed`
+- rendered `auto_start=yes|no`
 
 Illustrative JSON failure shape:
 

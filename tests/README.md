@@ -77,6 +77,39 @@ Implementation guidance:
 - Prefer golden human-readable fixtures for the stable column order and field labels of `sim list`, `sim inspect`, and `sim status`
 - Race-oriented tests should assert coherent observable outcomes, not scheduler-specific ordering
 
+Golden fixture contract for simulator CLI:
+
+```text
+tests/fixtures/
+└── cli/
+	└── sim/
+		├── list.default.txt
+		├── list.default.json
+		├── inspect.loopback.txt
+		├── inspect.loopback.json
+		├── inspect.test-stub.txt
+		├── inspect.test-stub.json
+		├── status.aggregate.running.txt
+		├── status.aggregate.running.json
+		├── status.device.running.txt
+		├── status.device.running.json
+		├── status.device.failed.txt
+		└── status.device.failed.json
+```
+
+Comparison rules:
+
+- compare `.json` fixtures structurally after JSON parsing
+- normalize dynamic fields such as PID, instance ID, and timestamps before JSON fixture comparison
+- compare `.txt` fixtures after trimming trailing spaces and allowing cosmetic alignment differences only where the spec explicitly says alignment is cosmetic
+- do not normalize marker words, labels, enum values, device names, simulator names, or `auto_start=yes|no`
+
+Recommended placeholder set used by the test harness:
+
+- `PID`
+- `INSTANCE_ID`
+- `TIMESTAMP`
+
 Recommended `v0.2.0` simulator test matrix:
 
 - `sim attach` creates runtime state and `sim status <device>` reports `attached`
