@@ -37,7 +37,7 @@ Canonical service account: `virtrtlab`
 |---|---|---|---|---|
 | Control socket | resolved daemon control-socket path; default installed path `/run/virtrtlab/control.sock` | `virtrtlab:virtrtlab` | `0660` | CLI, CI harnesses, diagnostics |
 | Data sockets | resolved per-device dataplane paths; default installed pattern `/run/virtrtlab/devices/*.sock` | `virtrtlab:virtrtlab` | `0660` | simulator processes |
-| Runtime directory | resolved daemon runtime root; default installed path `/run/virtrtlab/` | `virtrtlab:virtrtlab` | `0750` | daemon and group members |
+| Runtime directory | resolved daemon runtime root; default installed path `/run/virtrtlab` | `virtrtlab:virtrtlab` | `0750` | daemon and group members |
 | AUT-facing device nodes | VirtRTLab-owned `/dev/*` endpoints | group `virtrtlab` | `0660` | AUT binaries and harnesses |
 | Sysfs read-only attrs | `/sys/kernel/virtrtlab/**` | readable without group write ownership | `0444` | diagnostics |
 
@@ -143,7 +143,7 @@ behavior and hard-to-debug CI failures.
 ## 11. Decisions
 
 - the daemon does not stop or restart itself as part of routine `v0.2.0`
-	operation; hotplug-capable device lifecycle removes the need for daemon
-	self-restart in the normal model
+  operation; hotplug-capable device lifecycle removes the need for daemon
+  self-restart in the normal model
 - in the installed profile, managed simulator lifecycle is daemon-owned for
-	uniformity; the CLI does not become an alternative execution authority
+  uniformity; the CLI does not become an alternative execution authority

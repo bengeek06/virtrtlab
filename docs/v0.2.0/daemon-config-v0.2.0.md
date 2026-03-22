@@ -127,7 +127,7 @@ Rules:
 - `{device}` expands to the canonical VirtRTLab device name such as `uart0` or `gpio0`
 - the daemon must expose the resolved dataplane path through the control plane for every device that supports a data socket
 - examples under `/run/virtrtlab/...` are the default installed layout, not the
-	only valid deployed layout
+  only valid deployed layout
 
 Illustrative resolved paths:
 

@@ -579,6 +579,25 @@ Rules:
 - returns the post-reset `stats` object
 - does not modify non-stat attributes
 
+### Action naming rule
+
+All action names follow the scheme `<namespace>.<verb>` where `<verb>` MAY
+include one underscore-delimited qualifier to distinguish related operations
+within the same namespace (for example `stats_reset` vs `stats`, or
+`profile_apply` vs `profile_clear`). Namespaces and verbs are lowercase ASCII
+with no hyphens.
+
+| Namespace | Domain |
+|---|---|
+| `lab` | lab-level lifecycle and topology |
+| `device` | individual device operations |
+| `fault` | fault injection and profile management |
+| `sim` | simulator lifecycle and attachment |
+| `events` | event stream subscription |
+
+Clients MUST treat unrecognised action names as unsupported and MUST NOT infer
+semantics from partial name matching.
+
 ### 5.3 `fault.*`
 
 | Action | Purpose |
