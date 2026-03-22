@@ -83,23 +83,23 @@ Golden fixture contract for simulator CLI:
 ```text
 tests/fixtures/
 └── cli/
-	└── sim/
-		├── list.default.txt
-		├── list.default.json
-		├── list.verbose.txt
-		├── list.verbose.json
-		├── inspect.loopback.txt
-		├── inspect.loopback.json
-		├── inspect.test-stub.txt
-		├── inspect.test-stub.json
-		├── status.aggregate.attached.txt
-		├── status.aggregate.attached.json
-		├── status.aggregate.running.txt
-		├── status.aggregate.running.json
-		├── status.device.running.txt
-		├── status.device.running.json
-		├── status.device.failed.txt
-		└── status.device.failed.json
+    └── sim/
+        ├── list.default.txt
+        ├── list.default.json
+        ├── list.verbose.txt
+        ├── list.verbose.json
+        ├── inspect.loopback.txt
+        ├── inspect.loopback.json
+        ├── inspect.test-stub.txt
+        ├── inspect.test-stub.json
+        ├── status.aggregate.attached.txt
+        ├── status.aggregate.attached.json
+        ├── status.aggregate.running.txt
+        ├── status.aggregate.running.json
+        ├── status.device.running.txt
+        ├── status.device.running.json
+        ├── status.device.failed.txt
+        └── status.device.failed.json
 ```
 
 Comparison rules:
