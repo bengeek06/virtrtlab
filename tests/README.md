@@ -49,6 +49,7 @@ Scope:
 - single-client policy
 - reconnect, drain, and cleanup rules
 - backpressure/error propagation between wire device and socket endpoints
+- simulator lifecycle process tests: spawn, stop, crash detection, and runtime-state coherence
 
 Implementation guidance:
 
@@ -64,11 +65,31 @@ Scope:
 - `--json` output stability
 - exit code contract
 - daemon lifecycle subcommands
+- simulator catalog, attachment, and lifecycle commands
+- `--set` parsing and type-validation contract
+- partial startup semantics for `up --config`
 
 Implementation guidance:
 
 - Run the CLI as a subprocess exactly as CI will
 - Keep expected outputs in `tests/fixtures/`
+- Prefer golden JSON fixtures for `sim list`, `sim inspect`, and `sim status`
+- Race-oriented tests should assert coherent observable outcomes, not scheduler-specific ordering
+
+Recommended `v0.2.0` simulator test matrix:
+
+- `sim attach` creates runtime state and `sim status <device>` reports `attached`
+- `sim start` transitions to `running` with non-null `pid`
+- `sim stop` transitions to `stopped` with null `pid`
+- unexpected simulator exit transitions to `failed`
+- `restart_policy = on-failure` remains informational only in `v0.2.0`; no autonomous restart occurs
+- invalid `--set` syntax returns exit code `2`
+- invalid `--set` type or integer overflow returns exit code `2`
+- unknown simulator or device returns exit code `4`
+- concurrent lifecycle commands on one device never produce torn JSON state
+- deleting `/run/virtrtlab/simulators/state.json` forces aggregate regeneration on the next status query
+- deleting `/run/virtrtlab/simulators/` makes aggregate status empty and per-device status not found
+- `up --config` with mixed auto-start outcomes returns non-zero and exposes partial startup clearly
 
 ### `tests/helpers/`
 
@@ -87,6 +108,11 @@ Recommended split:
 1. `userspace-fast`: Python linting, CLI tests, daemon unit tests, documentation checks
 2. `kernel-integration`: privileged VM or self-hosted runner, module tests, UART/GPIO end-to-end scenarios
 3. `artifacts`: upload `dmesg`, daemon logs, exported stats, and JUnit XML
+
+For the simulator contract introduced in `v0.2.0`:
+
+1. `userspace-fast` should cover catalog parsing, `--json` stability, `--set` validation, and synthetic lifecycle tests with stub simulators
+2. integration jobs should cover real socket-connected simulator processes, crash handling, log capture, and partial `up --config` startup behaviour
 
 Hosted GitHub runners are fine for userspace-only checks. Kernel module tests should run in a privileged VM or dedicated self-hosted runner so module loading, `/sys/kernel/virtrtlab/`, and device nodes behave predictably.
 

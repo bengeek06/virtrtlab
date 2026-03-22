@@ -135,10 +135,24 @@ Parameter declaration fields:
 | Field | Type | Description |
 |---|---|---|
 | `name` | string | Stable parameter name used in attachments and profiles. |
-| `type` | string | Declared type. Initial set: `string`, `bool`, `u32`, `u64`. |
+| `type` | string | Declared type. Initial set: `string`, `bool`, `u32`, `u64`, `array`, `object`. |
 | `required` | bool | Whether the parameter must be provided by the attachment. |
 | `default` | scalar | Default value when not overridden. |
 | `description` | string | User-facing explanation. |
+
+Type semantics:
+
+| Type | Expected value |
+|---|---|
+| `string` | TOML string / JSON string |
+| `bool` | TOML boolean / JSON boolean |
+| `u32` | unsigned 32-bit integer |
+| `u64` | unsigned 64-bit integer |
+| `array` | JSON array or TOML array value |
+| `object` | JSON object or TOML table value |
+
+For `array` and `object`, VirtRTLab validates only the top-level kind in `v0.2.0`.
+Nested structure remains simulator-defined.
 
 ### 3.5 Example catalog entry
 
@@ -265,6 +279,74 @@ auto_start = true
 scenario_file = "./scenarios/urban-drive.toml"
 ```
 
+### 4.3.1 CLI override grammar for `sim attach --set`
+
+`virtrtlabctl sim attach` must support attachment-local overrides from the CLI.
+
+Initial grammar:
+
+```text
+--set <path>=<value>
+```
+
+Rules for `<path>`:
+
+- it addresses keys under `attachments.config`
+- segments are dot-separated, for example `timing.delay_ms` or `scenario.mode`
+- each segment uses lowercase ASCII letters, digits, `_`, or `-`
+- array indexing syntax such as `points[0]` is not part of the `v0.2.0` contract
+
+Rules for `<value>`:
+
+- scalar parameters may use plain CLI text such as `42`, `true`, or `gps`
+- structured values for `array` and `object` parameters must use JSON literals
+- when a structured value is provided, the targeted key is replaced atomically
+- repeated `--set` for the same path is allowed and the last value wins
+
+Examples:
+
+```sh
+virtrtlabctl sim attach uart0 loopback --set delay_ms=5
+virtrtlabctl sim attach uart1 gps --set scenario.mode=urban
+virtrtlabctl sim attach uart1 gps --set points='[{"lat":48.85,"lon":2.35}]'
+virtrtlabctl sim attach uart1 sensor --set profile='{"boot_ms":20,"burst":[1,2,3]}'
+```
+
+Validation rules for CLI overrides:
+
+- the first path segment must match a declared top-level parameter name
+- if the top-level parameter type is scalar, additional nested segments are rejected
+- if the top-level parameter type is `array` or `object`, nested segments are allowed
+- unknown top-level parameters are rejected
+- numeric overflow for `u32` and `u64` is rejected
+- invalid JSON literals for `array` and `object` are rejected
+- a nested assignment into a non-object intermediate value is rejected
+
+Merge rules:
+
+- scalar assignment replaces the target scalar value
+- object assignment with a JSON object replaces the target object value at that path
+- array assignment with a JSON array replaces the target array value at that path
+- dotted nested assignment updates only the addressed subtree and preserves sibling keys
+
+Illustrative mapping:
+
+```sh
+virtrtlabctl sim attach uart1 gps \
+	--set profile='{"boot_ms":20,"scenario":{"mode":"static"}}' \
+	--set profile.scenario.mode=urban
+```
+
+Resolved effective config:
+
+```toml
+[config.profile]
+boot_ms = 20
+
+[config.profile.scenario]
+mode = "urban"
+```
+
 ### 4.4 Attachment lifecycle and teardown
 
 Lifecycle expectations in `v0.2.0`:
@@ -275,6 +357,14 @@ Lifecycle expectations in `v0.2.0`:
 - if a simulator exits unexpectedly, the attachment state becomes `failed`
 - `restart_policy = "never"` means `virtrtlabctl` records failure and does not restart automatically
 - `restart_policy = "on-failure"` means a later revision may restart automatically; the contract reserves the value now but does not require immediate implementation sophistication
+
+`restart_policy` semantics in `v0.2.0`:
+
+- `restart_policy` is recorded in catalog metadata, resolved config, and `state.json`
+- no background supervisor loop is required in `v0.2.0`
+- `on-failure` does not imply automatic restart after crash, launch failure, `down`, or reboot
+- the only guaranteed recovery path in `v0.2.0` is an explicit later command such as `sim start <device>` or a new `up --config`
+- future revisions may strengthen `on-failure`, but `v0.2.0` scripts must not assume autonomous restart behaviour
 
 Readiness semantics in `v0.2.0` are intentionally minimal:
 
@@ -289,6 +379,38 @@ Bus reset semantics:
 - managed simulators must tolerate daemon disconnect and later re-connection when the runtime socket becomes usable again
 
 This preserves the existing daemon model and avoids conflating bus reset with process supervision.
+
+### 4.5 Profile-driven startup failure semantics
+
+`virtrtlabctl up --config <file>` may materialize multiple attachments from one lab profile.
+
+In `v0.2.0`, startup is split conceptually into two phases:
+
+1. profile validation and attachment materialization
+2. auto-start of attachments with `auto_start = true`
+
+Rules:
+
+- profile validation failures must abort before partial simulator startup
+- invalid attachment declarations must prevent any managed simulator process from being launched
+- once validation succeeds, attachment definitions may be materialized for all declared attachments before any auto-start begins
+- auto-start is then attempted attachment by attachment
+
+Partial failure semantics during auto-start:
+
+- if one auto-start attachment fails, `up --config` returns a non-zero exit code
+- attachments already started successfully before the failure are not rolled back automatically in `v0.2.0`
+- attachments not yet started remain in `attached` state
+- the failed attachment enters `failed` state with the normal `state.json` failure fields populated
+- the command output must make the partial-success situation explicit
+
+Rationale:
+
+- avoiding rollback keeps the contract simple and observable
+- successful simulator processes remain inspectable through `sim status` and `sim logs`
+- test harnesses can decide whether to call `down`, retry specific attachments, or continue diagnosis in-place
+
+This means `up --config` is atomic for validation, but not atomic for the start of all auto-start attachments.
 
 ---
 
@@ -586,11 +708,118 @@ Crash semantics:
 - `failed` means the last lifecycle attempt did not end in a clean operator-requested stop
 - in `v0.2.0`, `restart_policy = "on-failure"` does not require automatic restart; the file still records the intended policy for later revisions
 
+Observable `restart_policy` consequence in `v0.2.0`:
+
+- after a crash, the attachment remains in `failed` until an operator-driven action occurs
+- no implicit transition `failed -> starting` may happen solely because `restart_policy = "on-failure"`
+
 `virtrtlabctl down` semantics:
 
 - if an attachment is `running`, `starting`, or `stopping`, `virtrtlabctl down` must attempt a stop sequence before removing runtime state
 - after successful teardown, `/run/virtrtlab/simulators/` may be removed entirely
 - because `down` tears down the whole lab, no final persistent state file is required to survive that cleanup in `v0.2.0`
+
+### 5.6.4 Atomicity and locking
+
+Managed simulator state must be safe against concurrent CLI invocations.
+
+Initial `v0.2.0` contract:
+
+- one per-device lock protects `/run/virtrtlab/simulators/<device>/`
+- one aggregate lock protects `/run/virtrtlab/simulators/state.json`
+- `virtrtlabctl` must serialize conflicting lifecycle mutations on the same device
+- non-conflicting operations on different devices may proceed independently
+
+Locking intent:
+
+| Scope | Protected operations |
+|---|---|
+| per-device lock | `sim attach`, `sim detach`, `sim start`, `sim stop`, per-device state updates |
+| aggregate lock | aggregate state regeneration for `sim status` without device argument |
+| global lab teardown | `down`, and the simulator-related part of `up --config`, while lab-wide cleanup or materialization is running |
+
+Atomic update rules:
+
+- `state.json`, `attachment.toml`, and `config.toml` must be written by create-temp-and-rename semantics
+- `pid` may be written as a simple replacement file, but stale `pid` content must never survive a terminal state transition
+- aggregate `state.json` must be regenerated from per-device source-of-truth files, never edited in place by partial string mutation
+- `sim status` must observe either the old complete state or the new complete state, never a truncated file
+
+Failure handling rules:
+
+- if a process spawn succeeds but a later state-file update fails, the command must attempt best-effort process termination before returning an operational error
+- if lock acquisition fails due to timeout or unrecoverable I/O, the command returns exit code `1`
+- a stale lock caused by a dead process is an implementation concern; the observable contract is only that commands must not hang indefinitely
+
+### 5.6.5 Concurrent command semantics
+
+Concurrent lifecycle requests targeting the same device are serialized by the per-device lock.
+
+Observable outcomes:
+
+| Situation | Expected result |
+|---|---|
+| two concurrent `sim start uart0` | one succeeds, the other returns state conflict or sees already-running state |
+| `sim stop uart0` racing with `sim start uart0` | whichever acquires the device lock first completes first; the second evaluates the new post-lock state |
+| `sim attach uart0 ...` racing with `sim detach uart0` | serialized; final state matches command completion order |
+| `sim status uart0` during `sim start uart0` | may report `attached`, `starting`, or `running`, but must return a coherent single state object |
+| `sim status` during updates on multiple devices | aggregate output may reflect some devices before and others after independent operations, but each per-device object must be coherent |
+| `down` racing with any `sim * <device>` mutation | `down` wins once it acquires the relevant lock scope; later commands fail with operational or not-found errors depending on the resulting lab state |
+
+The contract does not require fairness beyond eventual completion.
+It does require bounded waiting or explicit failure rather than indefinite blocking.
+
+Recommended timeout guidance:
+
+- per-device lifecycle lock acquisition should fail in a bounded time on the order of seconds, not minutes
+- `sim status` should avoid waiting behind long process-stop paths when a coherent previous state can still be returned
+
+### 5.6.6 Persistence and cleanup semantics
+
+Simulator runtime state under `/run/virtrtlab/simulators/` is ephemeral.
+
+In `v0.2.0`, VirtRTLab distinguishes between:
+
+- attachment intent that exists only while the current lab runtime exists
+- durable simulator catalog definitions stored outside `/run`
+
+The initial persistence contract is intentionally simple:
+
+- attachment definitions created by `sim attach` are runtime-local, not reboot-persistent
+- `state.json`, `attachment.toml`, `config.toml`, `pid`, and `logs/` are all disposable runtime artifacts
+- after reboot or any loss of `/run/virtrtlab/simulators/`, no attachment is considered to exist anymore unless it is recreated by `sim attach` or `up --config`
+
+Observable semantics by event:
+
+| Event | Expected post-condition |
+|---|---|
+| `sim detach <device>` succeeds | `/run/virtrtlab/simulators/<device>/` is removed entirely |
+| `sim stop <device>` succeeds | attachment directory remains, with `state=stopped` and no `pid` |
+| `virtrtlabctl down` succeeds | `/run/virtrtlab/simulators/` may be removed entirely |
+| host reboot | `/run/virtrtlab/simulators/` is assumed lost; all attachments are therefore forgotten |
+| manual deletion of one per-device directory | that attachment is treated as detached on the next CLI observation |
+| manual deletion of aggregate `state.json` only | aggregate view is regenerated from per-device state on the next relevant command |
+| manual deletion of `pid` only while process still lives | implementation may reconstitute state by process checks or mark failure; it must not report a fake running PID |
+
+Rules for commands after runtime loss:
+
+- `sim status` with no existing runtime directory returns an empty attachment set, not an operational error
+- `sim status <device>` returns not found when no per-device runtime state exists
+- `sim start <device>` returns not found when the attachment runtime directory is absent, even if a simulator process somehow still exists outside management
+- `sim detach <device>` returns not found when no managed attachment runtime state exists
+
+Relationship with profiles:
+
+- profile files are the durable way to recreate attachments across reboots or fresh lab startups
+- `virtrtlabctl up --config <file>` may materialize attachments again from the profile regardless of previous `/run` contents
+- runtime attachment state must never be treated as a durable substitute for the lab profile
+
+Log retention rules:
+
+- logs under `/run/virtrtlab/simulators/<device>/logs/` are best-effort diagnostic artifacts only
+- `sim detach` removes them with the rest of the per-device runtime directory
+- `down` may remove all runtime logs as part of lab teardown
+- users who need durable logs must export or copy them before teardown
 
 ---
 
@@ -706,6 +935,12 @@ The output includes at least:
 - declared parameters and defaults
 - restart policy
 
+Machine-readable contract:
+
+- `virtrtlabctl --json sim inspect <name>` returns one JSON object
+- field names must match catalog semantics directly and remain stable across `v0.2.x`
+- unknown optional catalog fields may be added later but existing fields must not change type
+
 ### 7.4 `sim attach`
 
 Creates or replaces the attachment definition for one device.
@@ -785,6 +1020,12 @@ Status payload includes at least:
 - runtime config path
 - log directory path
 
+Machine-readable contract:
+
+- `virtrtlabctl --json sim status` returns the aggregate state file shape defined in section `5.6.2`
+- `virtrtlabctl --json sim status <device>` returns the per-device state file shape defined in section `5.6.1`
+- human-readable output may evolve cosmetically, but the JSON schema is part of the compatibility contract
+
 ### 7.9 `sim logs`
 
 Shows logs for the simulator attached to one device.
@@ -803,6 +1044,9 @@ This command reads logs from the managed attachment log directory; it does not a
 
 `--tail N --follow` is valid and means: print the last `N` lines, then keep following the file.
 
+When `--json` is used, `sim logs` is not required to wrap streamed log lines into JSON in `v0.2.0`.
+The initial contract reserves structured JSON output for non-streaming `sim` subcommands.
+
 ### 7.10 Exit-code expectations
 
 The existing global CLI exit-code model remains in force.
@@ -812,10 +1056,52 @@ Recommended mapping for simulator commands:
 | Code | Meaning |
 |---|---|
 | 0 | Success |
-| 1 | Operational error (spawn failure, process stop timeout, filesystem error) |
-| 2 | Bad arguments or invalid config syntax |
+| 1 | Operational error (spawn failure, process stop timeout, catalog parse error, filesystem error) |
+| 2 | Bad arguments, invalid config syntax, or parameter type validation error |
 | 3 | State conflict (already running, already attached, already starting) |
 | 4 | Not found or incompatible target (unknown simulator, unknown device, unsupported device kind, no attachment) |
+
+Stable JSON error envelope:
+
+```json
+{"error": "state conflict: uart0 is already running", "code": 3}
+```
+
+Rules:
+
+- the `error` string is for operators and logs
+- the numeric `code` is the scripting contract
+- the same numeric meaning must be preserved in human and JSON modes
+
+### 7.11 Reference CI validation scenarios
+
+The following scenarios define the minimum intended validation surface for the simulator lifecycle contract.
+
+They are written as observable behaviours, not implementation tests.
+
+| Scenario | Expected observable result |
+|---|---|
+| attach then status | `sim attach` succeeds and `sim status <device>` reports `attached` with stable metadata |
+| start then status | `sim start` yields `running`, non-null `pid`, non-null `started_at` |
+| stop then status | `sim stop` yields `stopped`, null `pid`, populated `stopped_at` |
+| crash transition | killing the simulator unexpectedly yields `failed`, null `pid`, populated `last_error` or non-zero `last_exit_code` |
+| `on-failure` without supervisor | a simulator with `restart_policy = on-failure` still remains `failed` after crash until an explicit command acts |
+| restart after failure | `failed -> starting -> running` is observable and clears `last_error` on success |
+| detach cleanup | `sim detach` removes the per-device runtime directory and later `sim status <device>` returns not found |
+| aggregate status regeneration | deleting aggregate `state.json` and running `sim status` regenerates a coherent aggregate view |
+| lost runtime dir | removing `/run/virtrtlab/simulators/` makes `sim status` return an empty set |
+| invalid `--set` syntax | malformed `--set` returns exit code `2` |
+| invalid `--set` type | parameter type mismatch or overflow returns exit code `2` |
+| unknown top-level parameter | `sim attach --set unknown=...` returns exit code `4` or `2` only if the CLI cannot even parse the expression; preferred result is `4` for unknown target parameter |
+| concurrent `sim start` | one command succeeds, the other reports a coherent state conflict or already-running result |
+| concurrent `sim stop` and `sim start` | no torn state file is observed; final state matches serialized completion order |
+| profile partial auto-start failure | `up --config` returns non-zero, successful earlier attachments remain observable, failed one is in `failed`, later ones remain `attached` |
+
+Recommended test partitioning:
+
+- CLI JSON and exit-code contract tests belong in `tests/cli/`
+- lifecycle/process integration tests belong in `tests/daemon/` or later simulator-specific integration suites
+- race-condition tests should assert coherent file/state outcomes, not scheduler-specific ordering
 
 ---
 
