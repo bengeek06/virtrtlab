@@ -4,9 +4,26 @@
 
 This document contains **draft CLI specification** for `v0.2.0` features that are not implemented in `v0.1.x` yet.
 
-It exists to avoid mixing forward-looking interface design with the current stable CLI reference in [virtrtlabctl.md](virtrtlabctl.md).
+It exists to avoid mixing forward-looking interface design with the current stable CLI reference in [../virtrtlabctl.md](../virtrtlabctl.md).
 
-The source of truth for the simulator runtime model remains [simulator-contract-v0.2.0.md](simulator-contract-v0.2.0.md).
+In `v0.2.0`, `virtrtlabctl` is a client of the daemon control plane. The
+canonical write-side control path is the daemon control socket specified in
+[control-socket-v0.2.0.md](control-socket-v0.2.0.md).
+
+The source of truth for the simulator runtime model remains
+[simulator-contract-v0.2.0.md](simulator-contract-v0.2.0.md). The broader
+`v0.2.0` architecture is defined in [spec-v0.2.0.md](spec-v0.2.0.md).
+
+## 0. Control-plane assumptions
+
+Unless stated otherwise, every `v0.2.0` CLI command described in this document:
+
+- connects to `/run/virtrtlab/control.sock`
+- sends one structured control request to the daemon
+- renders the daemon result in human-readable or JSON CLI form
+
+The CLI is therefore not the source of truth for topology or simulator state.
+It is the stable operator-facing frontend for the daemon-owned control plane.
 
 ---
 
@@ -25,7 +42,7 @@ virtrtlabctl sim status [<device>]
 virtrtlabctl sim logs <device> [--stderr] [--tail N] [--follow]
 ```
 
-All `sim` commands accept the global `--json` flag documented in [virtrtlabctl.md](virtrtlabctl.md).
+All `sim` commands accept the global `--json` flag documented in [../virtrtlabctl.md](../virtrtlabctl.md).
 
 When `--json` is used:
 
@@ -33,6 +50,11 @@ When `--json` is used:
 - for streaming commands (`sim logs`), JSON mode is not supported: the command MUST fail fast, print the standard error envelope `{"error": "...", "code": N}` on stdout, write a brief diagnostic to stderr, and exit with a stable non-zero status code
 - failures for all commands must use the stable error envelope `{"error": "...", "code": N}`
 - human-oriented aligned text is suppressed from stdout
+
+For successful non-streaming commands, the JSON document printed by the CLI is
+exactly the daemon `result` payload from the control socket, with the transport
+envelope fields `id` and `ok` removed. The CLI must not rename fields, change
+types, or restructure the payload.
 
 Human-readable mode contract:
 
@@ -182,7 +204,7 @@ Golden-fixture expectation:
 - `sim inspect` human-readable fixtures must preserve label order and parameter row order
 - `sim inspect` JSON fixtures must preserve parameter array order as emitted by the command
 
-When multiple visible versions share the same simulator name, `sim inspect <name>` without `--version` must fail with an ambiguity error.
+When multiple visible versions share the same simulator name, `sim inspect <name>` without `--version` must fail with the daemon error `ambiguous-simulator-version`, which the CLI maps to exit code `2`.
 
 ### `sim attach`
 
@@ -202,7 +224,7 @@ Behaviour:
 - validates that the target device exists
 - validates that the simulator exists and supports the device type
 - validates every `--set key=value` assignment against the simulator parameter declarations
-- writes runtime attachment state under the VirtRTLab runtime directory
+- submits the attachment request to the daemon, which owns the runtime attachment state
 - does not start the simulator process automatically unless the command is later combined with `sim start` or a profile-driven `up`
 
 `--set` contract in `v0.2.0`:
@@ -218,8 +240,13 @@ Behaviour:
 Version-selection contract:
 
 - `--version VERSION` pins attachment selection to one explicit simulator version
-- if `--version` is omitted and multiple visible versions share the same simulator name, `sim attach` fails with an ambiguity error
+- if `--version` is omitted and multiple visible versions share the same simulator name, `sim attach` fails with the daemon error `ambiguous-simulator-version`, which the CLI maps to exit code `2`
 - direct `sim attach` defaults to `auto_start = false` unless `--auto-start` is specified explicitly
+
+Attachment replacement rules:
+
+- `sim attach` replaces an existing attachment only when the current state is `attached`, `stopped`, or `failed`
+- attempting replacement while the current attachment is `starting`, `running`, or `stopping` fails with a state conflict
 
 Validation rules:
 
@@ -244,6 +271,7 @@ JSON output example:
 {
   "device": "uart0",
   "simulator": "loopback",
+  "version": "1.0.0",
   "state": "attached",
   "auto_start": false
 }
@@ -316,6 +344,7 @@ JSON output example:
 {
   "device": "uart0",
   "simulator": "loopback",
+  "version": "1.0.0",
   "state": "running",
   "pid": 14523
 }
@@ -406,12 +435,17 @@ Detailed-field contract:
 - when present for failure cases, `last error`, `last exit code`, and `stopped at` are appended after `log dir` in that order
 - labels are lowercase and space-separated exactly as shown
 
-Runtime state is stored under `/run/virtrtlab/simulators/`; see [simulator-contract-v0.2.0.md](simulator-contract-v0.2.0.md) for the exact layout.
+The daemon control plane is the source of truth for simulator lifecycle state.
+The runtime files under `/run/virtrtlab/simulators/` are daemon-owned runtime
+artifacts used to persist attachment state and logs; see
+[simulator-contract-v0.2.0.md](simulator-contract-v0.2.0.md) for the exact
+layout.
 
-The per-device state file is `/run/virtrtlab/simulators/<device>/state.json` and is the source of truth for lifecycle state, timestamps, PID, and the last observed failure.
-
-If `/run/virtrtlab/simulators/` does not exist, `sim status` without a device argument returns an empty set.
-If `/run/virtrtlab/simulators/<device>/state.json` does not exist, `sim status <device>` returns a not-found error.
+If the daemon is unavailable, `sim status` fails with a normal daemon-unavailable
+error. If the daemon is available but no attachments exist, `sim status` without
+a device argument returns an empty set. If the target device exists but has no
+attachment, `sim status <device>` returns the daemon error `not-attached`, which
+the CLI maps to exit code `4`.
 
 When the attachment is in `failed`, the detailed human-readable output must also include `last error`, `last exit code`, and `stopped at`.
 
@@ -541,7 +575,7 @@ description = "Delay before echoing received bytes back to the AUT"
 |---|---|
 | 0 | Success |
 | 1 | Operational error (spawn failure, stop timeout, filesystem error) |
-| 2 | Invalid arguments or invalid `--set key=value` syntax |
+| 2 | Invalid arguments, ambiguous simulator version selection, or invalid `--set key=value` syntax |
 | 3 | State conflict (already running, already attached, already starting) |
 | 4 | Not found or incompatible target (unknown simulator, unknown device, unsupported device type, no attachment) |
 
@@ -556,13 +590,18 @@ Recommended error mapping:
 | malformed `--set key=value` | 2 |
 | invalid value type for declared parameter | 2 |
 | missing required positional argument | 2 |
+| ambiguous simulator version selection | 2 |
 | `sim start` while already `running` | 3 |
 | `sim start` while already `starting` | 3 |
+| `sim attach` while an attachment is `running`, `starting`, or `stopping` | 3 |
+| `sim stop` on an `attached` or `failed` attachment | 3 |
 | lifecycle lock acquisition timeout | 1 |
 | unknown device | 4 |
 | unknown simulator | 4 |
 | unsupported device type for selected simulator | 4 |
 | `sim start` on detached device | 4 |
+| `sim detach` on detached device | 4 |
+| `sim status <device>` on unattached device | 4 |
 
 JSON failure examples:
 
@@ -616,7 +655,8 @@ auto_start = true
 delay_ms = 0
 ```
 
-`virtrtlabctl up --config ...` will validate `[[attachments]]` before partial startup.
+`virtrtlabctl up --config ...` sends the resolved profile to the daemon, which
+validates `[[attachments]]` before partial startup.
 If `auto_start` is omitted, the effective default comes from the simulator catalog `default_auto_start`; otherwise it falls back to `false`.
 Only attachments whose effective auto-start value is `true` are started automatically.
 
