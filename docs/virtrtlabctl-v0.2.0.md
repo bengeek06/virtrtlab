@@ -81,6 +81,8 @@ Column contract:
 
 Verbose output additionally shows the source file that defined each entry and whether it overrides a lower-precedence catalog definition.
 
+In `v0.2.0`, verbose list output should also expose the simulator version.
+
 JSON output example:
 
 ```json
@@ -88,6 +90,7 @@ JSON output example:
   "simulators": [
     {
       "name": "loopback",
+      "version": "1.0.0",
       "supports": ["uart"],
       "summary": "Echo bytes back to the same VirtRTLab point-to-point link",
       "catalog_file": "/usr/share/virtrtlab/simulators.d/loopback.toml",
@@ -115,6 +118,7 @@ Example output:
 
 ```text
 name            loopback
+version         1.0.0
 supports        uart
 summary         Echo bytes back to the same VirtRTLab point-to-point link
 catalog file    /usr/share/virtrtlab/simulators.d/loopback.toml
@@ -126,7 +130,7 @@ parameters:
 
 Field-order contract:
 
-- labeled lines appear in this order: `name`, `supports`, `summary`, `catalog file`, `restart policy`
+- labeled lines appear in this order: `name`, `version`, `supports`, `summary`, `catalog file`, `restart policy`
 - the `parameters:` heading is lowercase and ends with `:`
 - each parameter line lists `name`, `type=...`, `required=...`, and `default=...` in that order
 
@@ -135,6 +139,7 @@ JSON output example:
 ```json
 {
   "name": "loopback",
+  "version": "1.0.0",
   "supports": ["uart"],
   "summary": "Echo bytes back to the same VirtRTLab point-to-point link",
   "description": "Reference simulator used for smoke tests and contract validation",
@@ -156,6 +161,7 @@ Illustrative `test-stub` output:
 
 ```text
 name            test-stub
+version         1.0.0
 supports        uart
 summary         Deterministic simulator process for VirtRTLab CI and CLI validation
 catalog file    /usr/share/virtrtlab/simulators.d/test-stub.toml
@@ -374,6 +380,7 @@ Detailed single-device output example:
 ```text
 device          uart0
 simulator       loopback
+simulator version 1.0.0
 state           running
 pid             14523
 auto_start      yes
@@ -383,7 +390,7 @@ log dir         /run/virtrtlab/simulators/uart0/logs
 
 Detailed-field contract:
 
-- labeled lines appear in this order: `device`, `simulator`, `state`, `pid`, `auto_start`, `config file`, `log dir`
+- labeled lines appear in this order: `device`, `simulator`, `simulator version`, `state`, `pid`, `auto_start`, `config file`, `log dir`
 - when present for failure cases, `last error`, `last exit code`, and `stopped at` are appended after `log dir` in that order
 - labels are lowercase and space-separated exactly as shown
 
@@ -404,6 +411,7 @@ JSON output example for `sim status uart0`:
   "device": "uart0",
   "device_type": "uart",
   "simulator": "loopback",
+  "simulator_version": "1.0.0",
   "instance_id": "uart0-20260322T184200Z-14523",
   "state": "running",
   "auto_start": true,
@@ -431,6 +439,7 @@ JSON output example for `sim status` without a device argument:
       "device": "uart0",
       "state": "running",
       "simulator": "loopback",
+      "simulator_version": "1.0.0",
       "pid": 14523,
       "auto_start": true,
       "updated_at": "2026-03-22T18:42:00Z"
@@ -506,6 +515,7 @@ description = "Delay before echoing received bytes back to the AUT"
 
 - `sim inspect` must expose the declared restart policy
 - `sim status <device>` must expose the effective restart policy from runtime state
+- `sim inspect` and `sim status <device>` must expose the simulator version for validation traceability
 - in `v0.2.0`, `on-failure` is informational only and does not cause automatic restart by itself
 
 `test-stub` note:

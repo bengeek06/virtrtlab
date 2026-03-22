@@ -75,6 +75,7 @@ Implementation guidance:
 - Keep expected outputs in `tests/fixtures/`
 - Prefer golden JSON fixtures for `sim list`, `sim inspect`, and `sim status`
 - Prefer golden human-readable fixtures for the stable column order and field labels of `sim list`, `sim inspect`, and `sim status`
+- Ensure golden fixtures cover simulator version visibility in `sim inspect`, `sim list --verbose`, and `sim status <device>`
 - Race-oriented tests should assert coherent observable outcomes, not scheduler-specific ordering
 
 Golden fixture contract for simulator CLI:
@@ -129,6 +130,7 @@ Recommended `v0.2.0` simulator test matrix:
 - `up --config` with mixed auto-start outcomes returns non-zero and exposes partial startup clearly
 - human-readable success and error prefixes stay within the `[ok]`, `[info]`, `[warn]`, `[error]` set
 - aggregate status keeps field order `device`, `simulator=`, `state=`, `pid=`, `auto_start=`
+- detailed status and inspect outputs expose simulator version as part of validation identity
 
 ### `tests/helpers/`
 

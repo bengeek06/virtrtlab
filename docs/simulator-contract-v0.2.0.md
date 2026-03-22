@@ -105,6 +105,7 @@ Required top-level keys:
 |---|---|---|
 | `api_version` | integer | Catalog format version. Initial value: `1`. |
 | `name` | string | Stable simulator name used by CLI and profiles. |
+| `version` | string | Simulator version identifier. Required for validation traceability. |
 | `summary` | string | One-line human-readable description. |
 | `exec` | array of strings | Command vector executed by `virtrtlabctl` (`execve` style). |
 | `supports` | array of strings | Supported VirtRTLab device kinds such as `uart`, later `spi` or `i2c`. |
@@ -118,6 +119,13 @@ Optional top-level keys:
 | `args` | array of strings | Static arguments appended after `exec`. |
 | `default_auto_start` | bool | Hint for profile-driven startup. Default `false`. |
 | `restart_policy` | string | Lifecycle hint. Allowed initial values: `never`, `on-failure`. |
+
+Version semantics:
+
+- `version` identifies the simulator artifact or release, not the catalog format
+- `version` is compared as an opaque string in `v0.2.0`
+- semantic versioning such as `1.2.0` is recommended but not required by the base contract
+- validation tooling may record `name + version` as the simulator identity tuple
 
 Optional parameter declarations:
 
@@ -159,6 +167,7 @@ Nested structure remains simulator-defined.
 ```toml
 api_version = 1
 name = "loopback"
+version = "1.0.0"
 summary = "Echo bytes back to the same VirtRTLab point-to-point link"
 description = "Reference simulator used for smoke tests and third-party contract validation"
 exec = ["/usr/libexec/virtrtlab/sim-loopback"]
@@ -471,6 +480,7 @@ Before launching a simulator, `virtrtlabctl` writes the fully resolved attachmen
 The file includes:
 
 - simulator name
+- simulator version
 - target device name and type
 - effective parameter values after defaults and profile overrides
 - selected restart policy
@@ -479,6 +489,7 @@ Illustrative shape:
 
 ```toml
 simulator = "loopback"
+simulator_version = "1.0.0"
 device = "uart0"
 device_type = "uart"
 restart_policy = "never"
@@ -566,6 +577,7 @@ It is JSON encoded as one object with the following fields:
 | `device` | string | VirtRTLab device name, for example `uart0`. |
 | `device_type` | string | Device kind, for example `uart`. |
 | `simulator` | string | Catalog simulator name, for example `loopback`. |
+| `simulator_version` | string | Catalog simulator version string, for example `1.0.0`. |
 | `instance_id` | string | Runtime-unique attachment instance identifier. Changes on each successful `sim attach`. |
 | `state` | string enum | One of `attached`, `starting`, `running`, `stopping`, `stopped`, `failed`. |
 | `auto_start` | boolean | Effective auto-start policy for the attachment. |
@@ -584,7 +596,7 @@ It is JSON encoded as one object with the following fields:
 Field rules:
 
 - `schema_version` is required and must be `1` in the initial contract
-- `device`, `device_type`, `simulator`, `instance_id`, `state`, `auto_start`, `restart_policy`, `catalog_file`, `config_file`, `log_dir`, `created_at`, and `updated_at` are always present
+- `device`, `device_type`, `simulator`, `simulator_version`, `instance_id`, `state`, `auto_start`, `restart_policy`, `catalog_file`, `config_file`, `log_dir`, `created_at`, and `updated_at` are always present
 - `pid` is non-null only in `starting`, `running`, or `stopping`
 - `started_at` is non-null only after at least one successful spawn
 - `stopped_at` is non-null only after a terminal process state has been observed
@@ -599,6 +611,7 @@ Canonical example while running:
 	"device": "uart0",
 	"device_type": "uart",
 	"simulator": "loopback",
+	"simulator_version": "1.0.0",
 	"instance_id": "uart0-20260322T184200Z-14523",
 	"state": "running",
 	"auto_start": true,
@@ -624,6 +637,7 @@ Canonical example after a crash:
 	"device": "uart0",
 	"device_type": "uart",
 	"simulator": "loopback",
+	"simulator_version": "1.0.0",
 	"instance_id": "uart0-20260322T184200Z-14523",
 	"state": "failed",
 	"auto_start": true,
@@ -655,6 +669,7 @@ It is JSON encoded as:
 			"device": "uart0",
 			"state": "running",
 			"simulator": "loopback",
+			"simulator_version": "1.0.0",
 			"pid": 14523,
 			"auto_start": true,
 			"updated_at": "2026-03-22T18:42:00Z"
@@ -667,7 +682,7 @@ Rules:
 
 - `attachments` contains zero or more summaries, one per attached device
 - the file is a convenience view; the per-device file remains the source of truth
-- summary objects must contain at least `device`, `state`, `simulator`, `pid`, `auto_start`, and `updated_at`
+- summary objects must contain at least `device`, `state`, `simulator`, `simulator_version`, `pid`, `auto_start`, and `updated_at`
 
 ### 5.6.3 State transitions
 
@@ -880,6 +895,7 @@ Expected log behaviour:
 ```toml
 api_version = 1
 name = "loopback"
+version = "1.0.0"
 summary = "Echo bytes back to the same VirtRTLab point-to-point link"
 description = "Reference simulator used for smoke tests and contract validation"
 exec = ["/usr/libexec/virtrtlab/sim-loopback"]
@@ -952,6 +968,7 @@ Mode semantics:
 ```toml
 api_version = 1
 name = "test-stub"
+version = "1.0.0"
 summary = "Deterministic simulator process for VirtRTLab CI and CLI validation"
 description = "Reference stub used to exercise lifecycle, logs, and error handling without protocol realism"
 exec = ["/usr/libexec/virtrtlab/sim-test-stub"]
@@ -1043,6 +1060,7 @@ Shows the full metadata for one simulator entry.
 The output includes at least:
 
 - simulator name
+- simulator version
 - summary and description
 - supported device kinds
 - catalog source file
@@ -1135,6 +1153,7 @@ Status payload includes at least:
 
 - device name
 - simulator name
+- simulator version
 - attachment state
 - PID if a simulator process is currently alive
 - `auto_start` flag
