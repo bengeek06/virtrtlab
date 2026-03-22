@@ -47,7 +47,22 @@ Before writing code:
 
 ## Validation
 
-After changes, run the relevant daemon build and the most relevant tests you can reasonably execute.
+Before handing work to review or Git/GitHub preparation, run:
+
+```bash
+make check
+make qa
+python3 -m pytest -c pytest.ini tests/daemon
+```
+
+Before any PR, run the pytest suites separately:
+
+```bash
+python3 -m pytest -c pytest.ini tests/cli
+python3 -m pytest -c pytest.ini tests/daemon
+python3 -m pytest -c pytest.ini tests/kernel
+python3 -m pytest -c pytest.ini tests/install
+```
 
 When reporting back, summarize:
 

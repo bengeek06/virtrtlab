@@ -68,3 +68,10 @@ virtrtlab_core (bus + fault/jitter engine)
 - Inclure un commentaire de bloc en tête de fichier : description, auteur (VirtRTLab), licence SPDX
 - Expliquer brièvement les choix non évidents dans des commentaires inline
 - Si un TODO ou une question ouverte subsiste, marquer `/* TODO: ... */` clairement
+
+## Validation attendue
+
+- `make check`
+- `make qa-kernel-lint`
+- `python3 -m pytest -c pytest.ini tests/kernel`
+- avant toute PR, lancer separement : `python3 -m pytest -c pytest.ini tests/cli`, `python3 -m pytest -c pytest.ini tests/daemon`, `python3 -m pytest -c pytest.ini tests/kernel`, `python3 -m pytest -c pytest.ini tests/install`

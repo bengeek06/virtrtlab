@@ -68,3 +68,18 @@ If `checkpatch.pl` is available:
 ```bash
 scripts/checkpatch.pl --strict --no-tree -f kernel/*.c
 ```
+
+Before handing work to review or Git/GitHub preparation:
+```bash
+make check
+make qa-kernel-lint
+python3 -m pytest -c pytest.ini tests/kernel
+```
+
+Before any PR, run the pytest suites separately:
+```bash
+python3 -m pytest -c pytest.ini tests/cli
+python3 -m pytest -c pytest.ini tests/daemon
+python3 -m pytest -c pytest.ini tests/kernel
+python3 -m pytest -c pytest.ini tests/install
+```

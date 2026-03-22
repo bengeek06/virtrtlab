@@ -58,11 +58,28 @@ main  ←  always stable
 **Types**: `feat` `fix` `docs` `style` `refactor` `test` `ci` `chore`
 **Scopes**: `core` `uart` `can` `spi` `adc` `dac` `userspace` `build` `docs` `ci`
 
+## Quality gates (run before any push for review or any PR)
+
+- [ ] Branch is up-to-date with `main`
+- [ ] `make check` passes
+- [ ] Relevant QA passes:
+  - `make qa` for CLI and daemon changes
+  - `make qa-kernel-lint` when `kernel/**` changes
+- [ ] Pytest suites pass when run separately:
+  - `python3 -m pytest -c pytest.ini tests/cli`
+  - `python3 -m pytest -c pytest.ini tests/daemon`
+  - `python3 -m pytest -c pytest.ini tests/kernel`
+  - `python3 -m pytest -c pytest.ini tests/install`
+
+Do not recommend pushing a branch for review or opening a PR until these checks are green.
+
 ## PR checklist (run before creating any PR)
 
 - [ ] Branch is up-to-date with `main`
+- [ ] `make check` passes
+- [ ] Relevant QA passes (`make qa`, `make qa-kernel-lint` when kernel changes)
+- [ ] The pytest suites pass when run separately (`tests/cli`, `tests/daemon`, `tests/kernel`, `tests/install`)
 - [ ] WIP commits squashed into clean conventional commits
-- [ ] `make` passes in `kernel/`
 - [ ] PR body uses the standard template with `Closes #N`
 - [ ] At least 1 ACK from `kernel-reviewer` before merge
 

@@ -33,5 +33,8 @@ Tu travailles sur VirtRTLab, principalement sur virtrtlabctl, les harnesses Pyth
 
 ## Validation attendue
 
-- Execution du plus petit sous-ensemble pytest pertinent
-- Verification de l'aide CLI ou du comportement utilisateur si touche a l'interface
+- `make check`
+- `make qa-cli`
+- `python3 -m pytest -c pytest.ini tests/cli`
+- avant toute PR, lancer separement : `python3 -m pytest -c pytest.ini tests/cli`, `python3 -m pytest -c pytest.ini tests/daemon`, `python3 -m pytest -c pytest.ini tests/kernel`, `python3 -m pytest -c pytest.ini tests/install`
+- verification de l'aide CLI ou du comportement utilisateur si touche a l'interface

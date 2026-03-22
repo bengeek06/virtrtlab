@@ -46,7 +46,22 @@ Before writing code:
 
 ## Validation
 
-Run the smallest relevant pytest target and any targeted CLI checks you can perform.
+Before handing work to review or Git/GitHub preparation, run:
+
+```bash
+make check
+make qa-cli
+python3 -m pytest -c pytest.ini tests/cli
+```
+
+Before any PR, run the pytest suites separately:
+
+```bash
+python3 -m pytest -c pytest.ini tests/cli
+python3 -m pytest -c pytest.ini tests/daemon
+python3 -m pytest -c pytest.ini tests/kernel
+python3 -m pytest -c pytest.ini tests/install
+```
 
 When reporting back, summarize:
 

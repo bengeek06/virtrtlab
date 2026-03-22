@@ -8,7 +8,8 @@ Then:
 
 1. Identify the minimal correct change.
 2. Update the implementation and the closest relevant tests.
-3. Build the daemon and run the most relevant test subset.
-4. Summarize behavior changes, validation, and residual risk.
+3. Run `make check`, `make qa`, and `python3 -m pytest -c pytest.ini tests/daemon`.
+4. Before any PR, run `python3 -m pytest -c pytest.ini tests/cli`, `python3 -m pytest -c pytest.ini tests/daemon`, `python3 -m pytest -c pytest.ini tests/kernel`, and `python3 -m pytest -c pytest.ini tests/install`.
+5. Summarize behavior changes, validation, and residual risk.
 
 If the contract is ambiguous, stop and propose a spec update before proceeding.

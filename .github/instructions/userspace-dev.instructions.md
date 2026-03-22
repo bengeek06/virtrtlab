@@ -34,6 +34,8 @@ Tu travailles sur VirtRTLab, en particulier sur le daemon virtrtlabd et les cont
 
 ## Validation attendue
 
-- Rebuild du daemon apres modification
-- Execution du ou des tests les plus proches dans tests/daemon/
-- Si le comportement touche les privileges ou le socket, verifier aussi les contrats documentaires associes
+- `make check`
+- `make qa`
+- `python3 -m pytest -c pytest.ini tests/daemon`
+- avant toute PR, lancer separement : `python3 -m pytest -c pytest.ini tests/cli`, `python3 -m pytest -c pytest.ini tests/daemon`, `python3 -m pytest -c pytest.ini tests/kernel`, `python3 -m pytest -c pytest.ini tests/install`
+- si le comportement touche les privileges ou le socket, verifier aussi les contrats documentaires associes
