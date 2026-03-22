@@ -1,15 +1,20 @@
 ---
 description: VirtRTLab Python developer — implement and evolve virtrtlabctl, Python test harnesses, and repo tooling scripts
 tools:
-  - codebase
-  - editFiles
-  - runCommands
-  - fetch
-  - search
-  - problems
-  - usages
-  - changes
-  - terminalLastCommand
+  - search/codebase
+  - edit/editFiles
+  - execute/runInTerminal
+  - execute/getTerminalOutput
+  - web/fetch
+  - search/listDirectory
+  - search/fileSearch
+  - search/textSearch
+  - search/searchResults
+  - read/problems
+  - search/usages
+  - search/changes
+  - read/readFile
+  - read/terminalLastCommand
 handoffs:
   - label: "→ Code review"
     agent: python-reviewer

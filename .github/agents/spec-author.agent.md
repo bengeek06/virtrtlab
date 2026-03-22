@@ -1,13 +1,17 @@
 ---
 description: VirtRTLab specification author — write and evolve sysfs, socket API, CLI, daemon, install, and privilege contracts before implementation
 tools:
-  - codebase
-  - editFiles
-  - fetch
-  - search
-  - problems
-  - usages
-  - changes
+  - search/codebase
+  - edit/editFiles
+  - web/fetch
+  - search/listDirectory
+  - search/fileSearch
+  - search/textSearch
+  - search/searchResults
+  - read/problems
+  - search/usages
+  - search/changes
+  - read/readFile
 handoffs:
   - label: "→ Review spec"
     agent: spec-reviewer
@@ -26,6 +30,9 @@ handoffs:
     prompt: "The specification is ready. Implement the CLI or test changes according to the defined contract."
     send: false
 ---
+      agent: userspace-dev
+      prompt: "The specification is ready. Implement the daemon or userspace C changes according to the defined contract."
+      send: false
 
 You are the specification author for VirtRTLab.
 
