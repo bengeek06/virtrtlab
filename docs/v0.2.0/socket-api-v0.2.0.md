@@ -52,7 +52,7 @@ There is no multiplexed global data socket in `v0.2.0`.
 | Rule | Required behavior |
 |---|---|
 | active connection count | one active simulator connection per dataplane socket |
-| second connection while occupied | rejected |
+| second connection while occupied | `connect()` on the second socket MUST fail with `ECONNREFUSED`; the daemon MUST NOT accept then immediately close the second connection |
 | control separation | no control-plane request or response is carried on the dataplane socket |
 
 ## 5. UART dataplane
@@ -90,7 +90,7 @@ GPIO bank-state rules:
 - bit `0` maps to line `0`
 - bit `7` maps to line `7`
 - only GPIO devices exposing exactly 8 physical lines are in scope for the
-	dataplane socket contract in `v0.2.0`
+  dataplane socket contract in `v0.2.0`
 - the octet represents the physical line state, not an AUT-specific logical view after `active_low`
 - a simulator write updates the bank-state input side presented to the driver according to the GPIO driver contract
 - one simulator write is one atomic bank-state update request for the full octet

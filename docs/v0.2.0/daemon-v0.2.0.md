@@ -23,7 +23,7 @@ The daemon is responsible for all of the following:
 |---|---|---|
 | Control socket | resolved daemon control-socket path; default installed path `/run/virtrtlab/control.sock` | structured control-plane requests and responses |
 | Device data socket | resolved per-device dataplane path; default installed pattern `/run/virtrtlab/devices/<device>.sock` | simulator dataplane for one device |
-| Runtime root | resolved daemon runtime root; default installed path `/run/virtrtlab/` | daemon-owned state, pid files, sockets, simulator runtime metadata |
+| Runtime root | resolved daemon runtime root; default installed path `/run/virtrtlab` | daemon-owned state, pid files, sockets, simulator runtime metadata |
 
 The device dataplane contract remains separately specified in
 [socket-api-v0.2.0.md](socket-api-v0.2.0.md).
