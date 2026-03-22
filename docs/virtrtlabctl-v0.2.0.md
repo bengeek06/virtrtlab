@@ -16,8 +16,8 @@ The planned `v0.2.0` simulator-management surface is:
 
 ```text
 virtrtlabctl sim list [--type TYPE] [--verbose]
-virtrtlabctl sim inspect <name>
-virtrtlabctl sim attach <device> <simulator> [--auto-start] [--set key=value ...]
+virtrtlabctl sim inspect <name> [--version VERSION]
+virtrtlabctl sim attach <device> <simulator> [--version VERSION] [--auto-start] [--set key=value ...]
 virtrtlabctl sim detach <device>
 virtrtlabctl sim start <device>
 virtrtlabctl sim stop <device>
@@ -67,16 +67,17 @@ virtrtlabctl sim list --verbose
 Default output example:
 
 ```text
-loopback             supports=uart         Echo bytes back to the same VirtRTLab link
-test-stub            supports=uart         Deterministic simulator process for VirtRTLab CI and CLI validation
-ublox-m8-nmea        supports=uart         Simulated u-blox GPS speaking NMEA
+loopback      version=1.0.0  supports=uart  Echo bytes back to the same VirtRTLab link
+test-stub     version=1.0.0  supports=uart  Deterministic simulator process for VirtRTLab CI and CLI validation
+ublox-m8-nmea version=2.4.1  supports=uart  Simulated u-blox GPS speaking NMEA
 ```
 
 Column contract:
 
 - output is one simulator per line
-- columns appear in this order: `name`, `supports=...`, summary text
+- columns appear in this order: `name`, `version=...`, `supports=...`, summary text
 - alignment spaces are cosmetic and may vary
+- the `version=` key spelling is stable within `v0.2.x`
 - the `supports=` key spelling is stable within `v0.2.x`
 
 Verbose output additionally shows the source file that defined each entry and whether it overrides a lower-precedence catalog definition.
@@ -112,6 +113,7 @@ Displays full metadata for one simulator entry.
 ```sh
 virtrtlabctl sim inspect loopback
 virtrtlabctl sim inspect test-stub
+virtrtlabctl sim inspect loopback --version 1.0.0
 ```
 
 Example output:
@@ -179,12 +181,15 @@ Golden-fixture expectation:
 - `sim inspect` human-readable fixtures must preserve label order and parameter row order
 - `sim inspect` JSON fixtures must preserve parameter array order as emitted by the command
 
+When multiple visible versions share the same simulator name, `sim inspect <name>` without `--version` must fail with an ambiguity error.
+
 ### `sim attach`
 
 Attaches a catalog simulator to one VirtRTLab device without starting it.
 
 ```sh
 virtrtlabctl sim attach uart0 loopback
+virtrtlabctl sim attach uart0 loopback --version 1.0.0
 virtrtlabctl sim attach uart0 test-stub --set mode=crash --set runtime_ms=50
 virtrtlabctl sim attach uart1 ublox-m8-nmea --auto-start --set scenario_file=./scenarios/static-fix.toml
 virtrtlabctl sim attach uart1 gps --set profile='{"boot_ms":20,"scenario":{"mode":"urban"}}'
@@ -208,6 +213,12 @@ Behaviour:
 - scalar values use plain CLI text
 - structured values must use JSON literals for arrays and objects
 - repeated `--set` on the same path is allowed and the last value wins
+
+Version-selection contract:
+
+- `--version VERSION` pins attachment selection to one explicit simulator version
+- if `--version` is omitted and multiple visible versions share the same simulator name, `sim attach` fails with an ambiguity error
+- direct `sim attach` defaults to `auto_start = false` unless `--auto-start` is specified explicitly
 
 Validation rules:
 
@@ -363,14 +374,14 @@ virtrtlabctl sim status uart0
 Default output example:
 
 ```text
-uart0   simulator=loopback       state=running  pid=14523  auto_start=yes
-uart1   simulator=ublox-m8-nmea  state=attached pid=-      auto_start=no
+uart0   simulator=loopback version=1.0.0       state=running  pid=14523  auto_start=yes
+uart1   simulator=ublox-m8-nmea version=2.4.1  state=attached pid=-      auto_start=no
 ```
 
 Aggregate-column contract:
 
 - output is one attachment per line
-- columns appear in this order: device name, `simulator=...`, `state=...`, `pid=...`, `auto_start=...`
+- columns appear in this order: device name, `simulator=...`, `version=...`, `state=...`, `pid=...`, `auto_start=...`
 - `pid=-` is used when no live process exists
 - `auto_start` values are rendered as `yes` or `no`
 - alignment spaces are cosmetic and may vary
@@ -605,7 +616,8 @@ delay_ms = 0
 ```
 
 `virtrtlabctl up --config ...` will validate `[[attachments]]` before partial startup.
-Only attachments with `auto_start = true` are started automatically.
+If `auto_start` is omitted, the effective default comes from the simulator catalog `default_auto_start`; otherwise it falls back to `false`.
+Only attachments whose effective auto-start value is `true` are started automatically.
 
 ### `up --config` with simulator attachments
 
@@ -613,7 +625,7 @@ When a profile contains `[[attachments]]`, `up --config` behaves as follows in `
 
 1. validate the whole profile, including attachment declarations and parameter shapes
 2. materialize runtime attachment state for declared attachments
-3. auto-start only the attachments with `auto_start = true`
+3. auto-start only the attachments whose effective auto-start value is `true`
 
 Failure semantics:
 
@@ -698,6 +710,7 @@ Recommended placeholders for normalized human-readable comparisons:
 
 | Dynamic fragment | Placeholder |
 |---|---|
+| `version=1.0.0` | do not normalize |
 | `pid=14523` | `pid=PID` |
 | standalone PID field value | `PID` |
 | timestamp values | `TIMESTAMP` |

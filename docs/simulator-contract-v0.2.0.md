@@ -91,7 +91,9 @@ Later entries override earlier ones when the simulator name is identical.
 | 4 | `~/.config/virtrtlab/simulators.d/` | fallback when `XDG_CONFIG_HOME` is unset |
 | 5 | `./.virtrtlab/simulators.d/` | workspace-local catalog versioned with an AUT or validation project |
 
-If two entries define the same `name`, the highest-precedence file wins.
+If two entries define the same `(name, version)` tuple, the highest-precedence file wins.
+
+If two entries share the same `name` but different `version` values, they coexist as distinct visible catalog entries.
 
 Override behaviour must be explicit in CLI output, for example during `virtrtlabctl sim list --verbose` or equivalent diagnostics.
 
@@ -258,13 +260,16 @@ Attachment fields:
 |---|---|---|
 | `device` | string | VirtRTLab device name such as `uart0`. |
 | `simulator` | string | Catalog name such as `loopback`. |
-| `auto_start` | bool | Whether `virtrtlabctl up --config ...` starts it automatically. Default `false`. |
+| `version` | string | Optional simulator version selector. Required when multiple visible versions share the same simulator name. |
+| `auto_start` | bool | Whether `virtrtlabctl up --config ...` starts it automatically. If omitted, the effective default comes from the catalog `default_auto_start`, else falls back to `false`. |
 | `config` | table | Parameter overrides for the selected simulator. Scalars, arrays, and nested tables are allowed. |
 
 Validation rules:
 
 - `device` must exist in the resolved device set
 - `simulator` must exist in the resolved catalog
+- if `version` is present, the `(simulator, version)` pair must exist in the resolved catalog
+- if `version` is absent and multiple visible catalog entries share the same simulator name, validation fails with an ambiguity error
 - the simulator must support the target device kind
 - unknown `config` keys are rejected
 - missing required parameters are rejected
@@ -356,6 +361,31 @@ boot_ms = 20
 mode = "urban"
 ```
 
+### 4.3.2 Simulator version selection
+
+Simulator selection is version-aware in `v0.2.0`.
+
+Resolution rules:
+
+- the catalog identity key is `(name, version)`
+- precedence resolves collisions only for identical `(name, version)` tuples
+- attachments and `sim attach` may omit `version` only when exactly one visible catalog entry exists for the given simulator `name`
+- if multiple visible versions exist and no `version` is provided, the command or profile validation must fail and require explicit version selection
+- if `version` is provided and no exact match exists, the result is not found
+
+Canonical profile example with explicit version pinning:
+
+```toml
+[[attachments]]
+device = "uart0"
+simulator = "loopback"
+version = "1.0.0"
+auto_start = true
+
+[attachments.config]
+delay_ms = 0
+```
+
 ### 4.4 Attachment lifecycle and teardown
 
 Lifecycle expectations in `v0.2.0`:
@@ -374,6 +404,12 @@ Lifecycle expectations in `v0.2.0`:
 - `on-failure` does not imply automatic restart after crash, launch failure, `down`, or reboot
 - the only guaranteed recovery path in `v0.2.0` is an explicit later command such as `sim start <device>` or a new `up --config`
 - future revisions may strengthen `on-failure`, but `v0.2.0` scripts must not assume autonomous restart behaviour
+
+`default_auto_start` semantics in `v0.2.0`:
+
+- `default_auto_start` is consulted only when an attachment is materialized from a profile and the attachment omits `auto_start`
+- direct `sim attach` defaults to `auto_start = false` unless the operator explicitly requests auto-start
+- an attachment-local `auto_start` value always overrides the catalog `default_auto_start`
 
 Readiness semantics in `v0.2.0` are intentionally minimal:
 
@@ -950,8 +986,15 @@ Mode semantics:
 | Mode | Expected behaviour |
 |---|---|
 | `run` | connect to the socket, emit configured logs, and stay alive until signaled or until `runtime_ms` elapses |
-| `fail` | emit configured logs and exit non-zero during startup without entering durable `running` state |
-| `crash` | enter `running`, then exit with `exit_code` after `runtime_ms` or equivalent bounded delay |
+| `fail` | remain in `starting` during `startup_delay_ms`, then emit configured logs and exit non-zero before entering `running` |
+| `crash` | remain in `starting` during `startup_delay_ms`, enter `running`, then exit with `exit_code` after `runtime_ms` or a minimal bounded post-start delay |
+
+Determinism rules for lifecycle tests:
+
+- `startup_delay_ms` elapses entirely while the attachment remains in `starting`
+- `mode=fail` must never yield a durable observable `running` state
+- `mode=crash` must yield an observable `running` state before transitioning to `failed`
+- if `mode=crash` and `runtime_ms=0`, the implementation must still allow one bounded post-start interval so `running` is observable at least once
 
 #### Test value
 
@@ -1036,8 +1079,8 @@ The command names below are part of the `v0.2.0` contract draft.
 
 ```text
 virtrtlabctl sim list [--type TYPE] [--verbose]
-virtrtlabctl sim inspect <name>
-virtrtlabctl sim attach <device> <simulator> [--auto-start] [--set key=value ...]
+virtrtlabctl sim inspect <name> [--version VERSION]
+virtrtlabctl sim attach <device> <simulator> [--version VERSION] [--auto-start] [--set key=value ...]
 virtrtlabctl sim detach <device>
 virtrtlabctl sim start <device>
 virtrtlabctl sim stop <device>
@@ -1070,6 +1113,7 @@ The output includes at least:
 Machine-readable contract:
 
 - `virtrtlabctl --json sim inspect <name>` returns one JSON object
+- when multiple visible versions share the same simulator name, `--version VERSION` is required
 - field names must match catalog semantics directly and remain stable across `v0.2.x`
 - unknown optional catalog fields may be added later but existing fields must not change type
 
@@ -1091,13 +1135,16 @@ Arguments:
 
 Options:
 
+- `--version VERSION` selects one explicit simulator version when multiple versions exist
 - `--auto-start` sets the attachment `auto_start` flag to `true`
 - `--set key=value` provides per-attachment configuration overrides; option may be repeated
 
 Behaviour:
 
 - validates that the device exists
-- validates that the simulator exists and supports the device kind
+- validates that the selected simulator name exists, and if `--version` is provided validates the exact `(name, version)` pair
+- fails with an ambiguity error when multiple visible versions share the same simulator name and `--version` is omitted
+- validates that the resolved simulator supports the device kind
 - validates all provided config keys against declared parameters
 - writes the resolved attachment state into the VirtRTLab runtime state directory
 - does **not** start the simulator process implicitly; use `sim start` or profile-driven startup
