@@ -104,7 +104,7 @@ Behaviour:
 
 - launches the simulator using its catalog `exec` and `args`
 - passes runtime context through the environment variables defined in [simulator-contract-v0.2.0.md](simulator-contract-v0.2.0.md)
-- marks the attachment `running` once the process has been spawned successfully and has not exited immediately
+- transitions `attached -> starting -> running` once the process has been spawned successfully and has not exited immediately
 - does not wait for a simulator-specific readiness probe in `v0.2.0`
 
 ### `sim stop`
@@ -117,9 +117,9 @@ virtrtlabctl sim stop uart0
 
 Behaviour:
 
-- sends a graceful termination signal first
+- transitions `running -> stopping` by sending a graceful termination signal first
 - force-kills the process if it does not exit within a bounded timeout
-- keeps the attachment definition and leaves it in `stopped` state
+- keeps the attachment definition and leaves it in `stopped` state after the process exit is observed
 
 ### `sim status`
 
@@ -150,6 +150,8 @@ log dir         /run/virtrtlab/simulators/uart0/logs
 ```
 
 Runtime state is stored under `/run/virtrtlab/simulators/`; see [simulator-contract-v0.2.0.md](simulator-contract-v0.2.0.md) for the exact layout.
+
+The per-device state file is `/run/virtrtlab/simulators/<device>/state.json` and is the source of truth for lifecycle state, timestamps, PID, and the last observed failure.
 
 ### `sim logs`
 
@@ -198,6 +200,26 @@ description = "Delay before echoing received bytes back to the AUT"
 | 2 | Invalid arguments or invalid `--set key=value` syntax |
 | 3 | State conflict (already running, already attached, already starting) |
 | 4 | Not found or incompatible target (unknown simulator, unknown device, unsupported device type, no attachment) |
+
+### State transitions
+
+The CLI contract exposes the following nominal lifecycle:
+
+```text
+detached -> attached -> starting -> running -> stopping -> stopped
+                              \-> failed
+running ----------------------> failed
+failed -> starting -> running
+stopped -> starting -> running
+attached|stopped|failed -> detached
+```
+
+`failed` represents either:
+
+- a launch-time error during `sim start`
+- an unexpected process exit after the simulator was already `running`
+
+The precise `state.json` schema and transition rules are defined in [simulator-contract-v0.2.0.md](simulator-contract-v0.2.0.md).
 
 ---
 

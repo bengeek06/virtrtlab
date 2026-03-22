@@ -203,6 +203,7 @@ An attachment has the following conceptual states:
 | `attached` | simulator is selected but not running |
 | `starting` | `virtrtlabctl` is launching the simulator |
 | `running` | simulator process exists and has not exited; in `v0.2.0` this is a liveness state, not a readiness guarantee |
+| `stopping` | `virtrtlabctl` has requested termination and is waiting for process exit |
 | `failed` | launch failed or the simulator exited unexpectedly |
 | `stopped` | simulator was previously running and has been stopped cleanly |
 
@@ -431,20 +432,165 @@ Rules:
 - `logs/` is created lazily on first start of the attachment
 - `virtrtlabctl down` removes runtime-only state for active processes but may preserve attachment state if the command is later specified to support persistent lab attachments; `v0.2.0` initial expectation is full cleanup of process runtime under `/run`
 
-Illustrative `state.json` shape:
+### 5.6.1 Per-device `state.json` format
+
+`/run/virtrtlab/simulators/<device>/state.json` is the normative per-attachment state file.
+
+It is JSON encoded as one object with the following fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `schema_version` | integer | State file schema version. Initial value: `1`. |
+| `device` | string | VirtRTLab device name, for example `uart0`. |
+| `device_type` | string | Device kind, for example `uart`. |
+| `simulator` | string | Catalog simulator name, for example `loopback`. |
+| `instance_id` | string | Runtime-unique attachment instance identifier. Changes on each successful `sim attach`. |
+| `state` | string enum | One of `attached`, `starting`, `running`, `stopping`, `stopped`, `failed`. |
+| `auto_start` | boolean | Effective auto-start policy for the attachment. |
+| `restart_policy` | string enum | One of `never`, `on-failure`. |
+| `catalog_file` | string | Absolute path to the winning catalog entry file. |
+| `config_file` | string | Absolute path to the generated resolved config TOML file. |
+| `log_dir` | string | Absolute path to the simulator log directory. |
+| `pid` | integer or `null` | Managed simulator process ID while a process is believed alive. `null` otherwise. |
+| `last_exit_code` | integer or `null` | Last observed numeric exit status. `null` if the process never reached a terminal state yet or if the stop/crash path has not produced one. |
+| `last_error` | string or `null` | Short operator-facing failure reason for `failed` state, for example `execve failed` or `socket connect failed`. |
+| `created_at` | string | RFC 3339 timestamp for attachment creation. |
+| `started_at` | string or `null` | RFC 3339 timestamp of the latest successful process spawn. |
+| `stopped_at` | string or `null` | RFC 3339 timestamp of the latest terminal process transition. |
+| `updated_at` | string | RFC 3339 timestamp of the latest state mutation. |
+
+Field rules:
+
+- `schema_version` is required and must be `1` in the initial contract
+- `device`, `device_type`, `simulator`, `instance_id`, `state`, `auto_start`, `restart_policy`, `catalog_file`, `config_file`, `log_dir`, `created_at`, and `updated_at` are always present
+- `pid` is non-null only in `starting`, `running`, or `stopping`
+- `started_at` is non-null only after at least one successful spawn
+- `stopped_at` is non-null only after a terminal process state has been observed
+- `last_error` should be `null` outside `failed`
+- `last_exit_code` should be retained across later `stopped` and `failed` observations until the next successful `sim start`
+
+Canonical example while running:
 
 ```json
 {
+	"schema_version": 1,
 	"device": "uart0",
+	"device_type": "uart",
 	"simulator": "loopback",
+	"instance_id": "uart0-20260322T184200Z-14523",
 	"state": "running",
-	"pid": 14523,
 	"auto_start": true,
+	"restart_policy": "never",
 	"catalog_file": "/usr/share/virtrtlab/simulators.d/loopback.toml",
+	"config_file": "/run/virtrtlab/simulators/uart0/config.toml",
+	"log_dir": "/run/virtrtlab/simulators/uart0/logs",
+	"pid": 14523,
 	"last_exit_code": null,
+	"last_error": null,
+	"created_at": "2026-03-22T18:40:10Z",
+	"started_at": "2026-03-22T18:42:00Z",
+	"stopped_at": null,
 	"updated_at": "2026-03-22T18:42:00Z"
 }
 ```
+
+Canonical example after a crash:
+
+```json
+{
+	"schema_version": 1,
+	"device": "uart0",
+	"device_type": "uart",
+	"simulator": "loopback",
+	"instance_id": "uart0-20260322T184200Z-14523",
+	"state": "failed",
+	"auto_start": true,
+	"restart_policy": "never",
+	"catalog_file": "/usr/share/virtrtlab/simulators.d/loopback.toml",
+	"config_file": "/run/virtrtlab/simulators/uart0/config.toml",
+	"log_dir": "/run/virtrtlab/simulators/uart0/logs",
+	"pid": null,
+	"last_exit_code": 1,
+	"last_error": "process exited unexpectedly",
+	"created_at": "2026-03-22T18:40:10Z",
+	"started_at": "2026-03-22T18:42:00Z",
+	"stopped_at": "2026-03-22T18:42:03Z",
+	"updated_at": "2026-03-22T18:42:03Z"
+}
+```
+
+### 5.6.2 Aggregate `state.json` format
+
+`/run/virtrtlab/simulators/state.json` is the aggregate state file used to serve `virtrtlabctl sim status` without a device argument.
+
+It is JSON encoded as:
+
+```json
+{
+	"schema_version": 1,
+	"attachments": [
+		{
+			"device": "uart0",
+			"state": "running",
+			"simulator": "loopback",
+			"pid": 14523,
+			"auto_start": true,
+			"updated_at": "2026-03-22T18:42:00Z"
+		}
+	]
+}
+```
+
+Rules:
+
+- `attachments` contains zero or more summaries, one per attached device
+- the file is a convenience view; the per-device file remains the source of truth
+- summary objects must contain at least `device`, `state`, `simulator`, `pid`, `auto_start`, and `updated_at`
+
+### 5.6.3 State transitions
+
+The state machine is driven by attachment lifecycle events.
+
+Allowed transitions:
+
+| Current state | Event | Next state | Observable effect |
+|---|---|---|---|
+| `detached` | `sim attach` succeeds | `attached` | attachment files are created and `state.json` appears |
+| `attached` | `sim start` requested | `starting` | PID may be recorded once the child exists; logs/config are prepared |
+| `starting` | child remains alive past immediate launch checks | `running` | `started_at` is set, `last_error` cleared |
+| `starting` | spawn or early initialization fails | `failed` | `pid` becomes `null`, `last_error` is populated |
+| `running` | `sim stop` requested | `stopping` | graceful termination begins |
+| `stopping` | process exits after requested stop | `stopped` | `pid` becomes `null`, `stopped_at` and `last_exit_code` are updated |
+| `running` | process exits without operator-requested stop | `failed` | treated as crash or unexpected exit |
+| `failed` | `sim start` requested again and succeeds | `starting` then `running` | previous failure is retained until successful restart clears `last_error` |
+| `stopped` | `sim start` requested | `starting` | same behaviour as first start |
+| `attached` | `sim detach` succeeds | `detached` | per-device runtime directory is removed |
+| `stopped` | `sim detach` succeeds | `detached` | per-device runtime directory is removed |
+| `failed` | `sim detach` succeeds | `detached` | failure state is discarded with the attachment |
+
+Disallowed transitions and CLI outcomes:
+
+| Current state | Event | Result |
+|---|---|---|
+| `running` | `sim start` | state conflict error |
+| `starting` | `sim start` | state conflict error |
+| `attached` | `sim stop` | operational error because no process exists |
+| `failed` | `sim stop` | operational error because no live process exists |
+| `detached` | `sim start` | not-found error because no attachment exists |
+| `detached` | `sim detach` | not-found error because no attachment exists |
+
+Crash semantics:
+
+- an unexpected process exit from `running` always transitions to `failed`
+- a launch-time failure from `starting` also transitions to `failed`
+- `failed` means the last lifecycle attempt did not end in a clean operator-requested stop
+- in `v0.2.0`, `restart_policy = "on-failure"` does not require automatic restart; the file still records the intended policy for later revisions
+
+`virtrtlabctl down` semantics:
+
+- if an attachment is `running`, `starting`, or `stopping`, `virtrtlabctl down` must attempt a stop sequence before removing runtime state
+- after successful teardown, `/run/virtrtlab/simulators/` may be removed entirely
+- because `down` tears down the whole lab, no final persistent state file is required to survive that cleanup in `v0.2.0`
 
 ---
 
