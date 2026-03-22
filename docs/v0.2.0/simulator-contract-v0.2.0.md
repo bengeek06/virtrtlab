@@ -430,6 +430,14 @@ Bus reset semantics:
 - `vrtlbus0 state=reset` does **not** imply that `virtrtlabctl` must kill the simulator process
 - managed simulators must tolerate daemon disconnect and later re-connection when the runtime socket becomes usable again
 
+Minimum reconnect contract after dataplane loss caused by reset:
+
+- a compliant simulator must treat loss of the current dataplane connection as a transient condition when the attachment state is still managed and the process is not being stopped
+- after observing EOF, connection reset, or initial connect failure during a reset window, the simulator should retry `connect()` to `VIRTRTLAB_SIM_SOCKET` with bounded backoff instead of exiting immediately
+- the retry backoff should be short and bounded; the recommended initial range for `v0.2.0` interoperability is 50 ms to 500 ms between attempts
+- no dedicated readiness event is required in `v0.2.0`; simulator authors should treat successful reconnect as the readiness signal for resumed dataplane traffic
+- operator tooling should not infer reconnect success from process liveness alone; it should use `sim status`, device-level reads, or an explicit end-to-end probe when reconnect timing matters
+
 This preserves the existing daemon model and avoids conflating bus reset with process supervision.
 
 Path-discovery rule:

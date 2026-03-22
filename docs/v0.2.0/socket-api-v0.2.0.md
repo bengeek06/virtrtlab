@@ -113,6 +113,12 @@ control through the normal Linux GPIO userspace interfaces.
 | bus or device reset invalidates the current data path | daemon closes and recreates the affected internal relay resources; the simulator connection is dropped |
 | device destroy | existing sessions are closed, new connections fail because the endpoint no longer exists, and the data socket path disappears for that device |
 
+Reconnect expectations after reset:
+
+- after a reset-driven disconnect, the daemon returns to accepting a new dataplane connection for that device once the internal relay resources are usable again
+- `v0.2.0` does not define a separate readiness notification on the dataplane socket itself
+- simulator processes are expected to retry connection attempts according to the simulator contract rather than waiting for an out-of-band reconnect signal
+
 Type-specific notes:
 
 - for UART, disconnect handling may flush stale AUT-to-simulator bytes before returning to waiting state

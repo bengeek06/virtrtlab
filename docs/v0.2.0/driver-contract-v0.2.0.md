@@ -144,6 +144,10 @@ Required minimum read-side attributes:
 | `stats/` | ro subtree | per-device counters |
 | `stats/reset` | wo compatibility entry | writing `1` resets the same counters as `device.stats_reset`; any other value is invalid |
 
+Illustrative invalid `stats/reset` write outcome:
+
+- writing `0`, `2`, or any non-integer text to `stats/reset` fails with the same invalid-value behavior as the control-plane `device.stats_reset` compatibility surface expects
+
 Additional read-only attributes are device-specific.
 
 ### 6.2 Writable sysfs
@@ -187,6 +191,10 @@ Common persistent-attribute range rules:
 
 If a driver imposes a lower implementation maximum for `latency_ns` or
 `jitter_ns`, values above that maximum must fail with `invalid-value`.
+
+When these implementation maxima are bounded, they must be discoverable through
+the driver capability object so clients can validate requests without relying
+on trial-and-error writes.
 
 ### 7.3 Reset
 
@@ -250,6 +258,8 @@ Normative capability fields:
 | `hotplug` | boolean | runtime create/destroy supported |
 | `max_devices` | integer or `null` | implementation maximum, if bounded |
 | `line_count` | integer or `null` | physical line count for line-oriented devices, else `null` |
+| `latency_ns_max` | integer or `null` | maximum accepted `latency_ns` value when bounded, else `null` |
+| `jitter_ns_max` | integer or `null` | maximum accepted `jitter_ns` value when bounded, else `null` |
 | `persistent_attrs` | array of strings | writable attr names accepted by `device.set` |
 | `injection_kinds` | array of strings | supported `fault.inject` kinds |
 | `path_keys` | array of strings | path keys returned by `device.get` |
@@ -262,6 +272,8 @@ Illustrative capability object:
   "hotplug": true,
   "max_devices": 32,
   "line_count": 8,
+  "latency_ns_max": 1000000000,
+  "jitter_ns_max": 1000000000,
   "persistent_attrs": [
     "enabled",
     "latency_ns",
@@ -273,6 +285,13 @@ Illustrative capability object:
   "path_keys": ["chip_path", "data_path", "sysfs_path"]
 }
 ```
+
+Rules:
+
+- if a driver accepts `latency_ns` or `jitter_ns`, it should expose the
+  corresponding maximum through `latency_ns_max` and `jitter_ns_max`
+- if the driver has no practical bound beyond the accepted integer type, the
+  field may be `null`
 
 ## 10. Driver-specific obligations
 

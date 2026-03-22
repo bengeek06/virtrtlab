@@ -448,6 +448,11 @@ a device argument returns an empty set. If the target device exists but has no
 attachment, `sim status <device>` returns the daemon error `not-attached`, which
 the CLI maps to exit code `4`.
 
+Reconnect note:
+
+- after a bus or device reset, `sim status <device>` may continue to report `running` while the simulator is still retrying connection to the dataplane socket
+- when reconnect timing matters, operators and CI should combine `sim status` with a device-level dataplane probe or higher-level smoke check instead of treating `running` as a reconnect guarantee
+
 When the attachment is in `failed`, the detailed human-readable output must also include `last error`, `last exit code`, and `stopped at`.
 
 JSON output example for `sim status uart0`:
@@ -578,7 +583,7 @@ description = "Delay before echoing received bytes back to the AUT"
 | 1 | Operational error (spawn failure, stop timeout, filesystem error) |
 | 2 | Invalid arguments, ambiguous simulator version selection, or invalid `--set key=value` syntax |
 | 3 | State conflict (already running, already attached, already starting) |
-| 4 | Not found or incompatible target (unknown simulator, unknown device, unsupported device type, no attachment) |
+| 4 | Not found or incompatible target (unknown simulator, unknown device, incompatible target, no attachment) |
 
 Recommended error mapping:
 
@@ -611,7 +616,17 @@ JSON failure examples:
 ```
 
 ```json
+{"error": "incompatible target: loopback does not support gpio0", "code": 4}
+```
+
+```json
 {"error": "state conflict: uart0 is already running", "code": 3}
+```
+
+Human-readable incompatible-target example:
+
+```text
+[error] incompatible target: loopback does not support gpio0
 ```
 
 ### State transitions

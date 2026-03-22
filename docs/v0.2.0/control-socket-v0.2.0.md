@@ -301,9 +301,31 @@ Success result fields:
 | `daemon.control_api_framing` | string | control API framing identifier, initial value `jsonl` |
 | `devices` | array | current device summaries |
 | `simulators` | array | current simulator attachment summaries |
-| `capabilities` | array | driver capability summaries known to the daemon |
+| `capabilities` | array | driver capability summaries known to the daemon, including discoverable attr maxima when the driver advertises them |
 
 `lab.status` is read-only and must not mutate topology or simulator state.
+
+Illustrative capability summary:
+
+```json
+{
+  "type": "uart",
+  "hotplug": true,
+  "max_devices": 8,
+  "line_count": null,
+  "latency_ns_max": 1000000000,
+  "jitter_ns_max": 1000000000,
+  "persistent_attrs": [
+    "enabled",
+    "latency_ns",
+    "jitter_ns",
+    "drop_rate_ppm",
+    "bitflip_rate_ppm"
+  ],
+  "injection_kinds": ["rx-bytes"],
+  "path_keys": ["aut_path", "data_path", "sysfs_path"]
+}
+```
 
 #### `lab.apply_profile`
 
@@ -492,6 +514,7 @@ Rules:
 - unknown writable keys return `unknown-attribute`
 - read-only keys return `read-only-attribute`
 - common persistent-attribute validation follows the driver-contract ranges: `enabled` is boolean, `latency_ns` and `jitter_ns` are non-negative nanosecond integers subject to implementation maxima, and `drop_rate_ppm` plus `bitflip_rate_ppm` are integers in the inclusive range `0..1000000`
+- when the target driver advertises `latency_ns_max` or `jitter_ns_max` in its capability object, values above those maxima return `invalid-value`
 
 Success result:
 
@@ -1035,6 +1058,25 @@ Recommended action-specific error mapping:
 | `sim.stop` | attachment absent | `not-attached` |
 | `sim.stop` | attachment exists but is not live and not `stopped` | `state-conflict` |
 | `sim.status` with `device` | device exists but attachment absent | `not-attached` |
+
+Illustrative incompatible-target error:
+
+```json
+{
+  "id": "req-attach-2",
+  "ok": false,
+  "error": {
+    "code": "incompatible-target",
+    "message": "simulator loopback does not support device type gpio",
+    "retryable": false,
+    "details": {
+      "device": "gpio0",
+      "device_type": "gpio",
+      "simulator": "loopback"
+    }
+  }
+}
+```
 
 ## 7. Versioning
 
