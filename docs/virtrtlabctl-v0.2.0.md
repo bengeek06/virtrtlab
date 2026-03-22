@@ -25,12 +25,13 @@ virtrtlabctl sim status [<device>]
 virtrtlabctl sim logs <device> [--stderr] [--tail N] [--follow]
 ```
 
-All `sim` commands inherit the global `--json` flag documented in [virtrtlabctl.md](virtrtlabctl.md).
+All `sim` commands accept the global `--json` flag documented in [virtrtlabctl.md](virtrtlabctl.md).
 
 When `--json` is used:
 
-- successful output must be valid JSON on stdout
-- failures must use the stable error envelope `{"error": "...", "code": N}`
+- for non-streaming commands (`sim list`, `sim inspect`, `sim attach`, `sim detach`, `sim start`, `sim stop`, `sim status`), successful output must be a single valid JSON document on stdout
+- for streaming commands (`sim logs`), JSON mode is not supported: the command MUST fail fast, print the standard error envelope `{"error": "...", "code": N}` on stdout, write a brief diagnostic to stderr, and exit with a stable non-zero status code
+- failures for all commands must use the stable error envelope `{"error": "...", "code": N}`
 - human-oriented aligned text is suppressed from stdout
 
 Human-readable mode contract:
