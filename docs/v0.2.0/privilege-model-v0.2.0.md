@@ -35,9 +35,9 @@ Canonical service account: `virtrtlab`
 
 | Surface | Path pattern | Owner/group contract | Mode contract | Primary consumer |
 |---|---|---|---|---|
-| Control socket | `/run/virtrtlab/control.sock` | `virtrtlab:virtrtlab` | `0660` | CLI, CI harnesses, diagnostics |
-| Data sockets | `/run/virtrtlab/devices/*.sock` | `virtrtlab:virtrtlab` | `0660` | simulator processes |
-| Runtime directory | `/run/virtrtlab/` | `virtrtlab:virtrtlab` | `0750` | daemon and group members |
+| Control socket | resolved daemon control-socket path; default installed path `/run/virtrtlab/control.sock` | `virtrtlab:virtrtlab` | `0660` | CLI, CI harnesses, diagnostics |
+| Data sockets | resolved per-device dataplane paths; default installed pattern `/run/virtrtlab/devices/*.sock` | `virtrtlab:virtrtlab` | `0660` | simulator processes |
+| Runtime directory | resolved daemon runtime root; default installed path `/run/virtrtlab/` | `virtrtlab:virtrtlab` | `0750` | daemon and group members |
 | AUT-facing device nodes | VirtRTLab-owned `/dev/*` endpoints | group `virtrtlab` | `0660` | AUT binaries and harnesses |
 | Sysfs read-only attrs | `/sys/kernel/virtrtlab/**` | readable without group write ownership | `0444` | diagnostics |
 

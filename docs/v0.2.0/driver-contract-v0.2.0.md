@@ -93,6 +93,15 @@ Destroy must be externally observable as follows:
 - any per-device simulator attachment is stopped or rejected before destruction completes
 - outstanding references held by userspace fail with the documented transport error for that surface
 
+Required destroy outcomes by surface:
+
+| Surface | Required outcome after destroy becomes visible |
+|---|---|
+| control plane | subsequent `device.get`, `device.set`, `device.reset`, `device.stats`, and `device.stats_reset` return `unknown-device` |
+| sysfs subtree | `/sys/kernel/virtrtlab/devices/<device>/` disappears; later reads or writes fail as absent paths |
+| simulator dataplane socket | existing connections are closed and later connection attempts fail because the device dataplane endpoint no longer exists |
+| AUT-facing endpoint | new opens or acquisitions fail because the device no longer exists; previously opened handles must not continue to report successful new I/O after destroy becomes visible |
+
 ## 5. Mandatory discovery surface
 
 Each device instance must expose the following fields through the daemon control plane.
@@ -131,8 +140,9 @@ Required minimum read-side attributes:
 |---|---|---|
 | `type` | ro | device type |
 | `bus` | ro | owning VirtRTLab bus or lab scope |
-| `state` | ro | current lifecycle or enablement state |
-| `stats/` | ro subtree plus reset entry | per-device counters |
+| `state` | ro | current device lifecycle state; one of `creating`, `up`, `resetting`, `destroying`, or `error` |
+| `stats/` | ro subtree | per-device counters |
+| `stats/reset` | wo compatibility entry | writing `1` resets the same counters as `device.stats_reset`; any other value is invalid |
 
 Additional read-only attributes are device-specific.
 
@@ -164,6 +174,19 @@ Each driver must validate:
 - out-of-range scalar values
 - malformed structured payloads
 - requests that conflict with the current device state
+
+Common persistent-attribute range rules:
+
+| Attribute | Type | Valid values | Notes |
+|---|---|---|---|
+| `enabled` | boolean | `true` or `false` | disables or enables the fault surface without renaming or removing the device |
+| `latency_ns` | integer | `0` to implementation maximum inclusive | unit is nanoseconds; negative values and integer overflow are invalid |
+| `jitter_ns` | integer | `0` to implementation maximum inclusive | unit is nanoseconds; negative values and integer overflow are invalid |
+| `drop_rate_ppm` | integer | `0` to `1000000` inclusive | probability per million transfer units |
+| `bitflip_rate_ppm` | integer | `0` to `1000000` inclusive | probability per million transfer units |
+
+If a driver imposes a lower implementation maximum for `latency_ns` or
+`jitter_ns`, values above that maximum must fail with `invalid-value`.
 
 ### 7.3 Reset
 
@@ -201,6 +224,19 @@ Each supported fault surface must specify:
 
 If a driver does not support one of the common fault attrs, it must reject the
 field explicitly rather than silently ignore it.
+
+Common device-state values exposed through sysfs and the control plane:
+
+| State | Meaning |
+|---|---|
+| `creating` | the device is being materialized and is not yet ready for normal operator use |
+| `up` | the device exists and is in its normal operator-usable state |
+| `resetting` | a reset operation is in progress |
+| `destroying` | a destroy operation is in progress |
+| `error` | the device hit an operational failure requiring operator attention |
+
+Drivers may expose transitional states only while the corresponding operation is
+in progress. The normal quiescent state of an existing usable device is `up`.
 
 ## 9. Driver capability declaration
 
@@ -257,7 +293,8 @@ Examples: `gpio`.
 Additional obligations:
 
 - define line addressing and valid line ranges
-- define behavior when the AUT currently owns a line as output
+- reject simulator-originated bank-state writes with `state-conflict` when any targeted line is currently owned by the AUT as output
+- apply GPIO dataplane writes atomically per octet: if any targeted line conflicts with current AUT output ownership, none of the written bits take effect
 - define edge-event or sampled-value semantics where applicable
 - define the simulator-facing bank-state dataplane semantics if a dataplane socket is exposed
 - if a dataplane socket is exposed in `v0.2.0`, the device must expose exactly
@@ -273,6 +310,7 @@ Each driver contract must map failures into stable daemon-visible categories.
 | unsupported attr name | `unknown-attribute` |
 | attempt to write read-only field | `read-only-attribute` |
 | invalid scalar or structured value | `invalid-value` or `invalid-payload` |
+| existing object but incompatible target relationship | `incompatible-target` |
 | state conflict | `state-conflict` |
 | kernel-side failure | `kernel-failure` |
 

@@ -38,6 +38,9 @@ Canonical search order:
 
 If the selected config file exists but is malformed, daemon startup fails.
 
+Configuration snippets in this document are illustrative examples. Normative
+requirements are defined by the key tables and rule lists that accompany them.
+
 ## 3. Top-level sections
 
 The following top-level sections are defined in `v0.2.0`:
@@ -65,14 +68,17 @@ simulator_dir = "/run/virtrtlab/simulators"
 |---|---|---|---|
 | `root_dir` | string | `/run/virtrtlab` | base runtime directory |
 | `pid_file` | string | `/run/virtrtlab/virtrtlabd.pid` | daemon pid file path |
-| `state_dir` | string | `/run/virtrtlab/state` | daemon-owned state directory |
-| `simulator_dir` | string | `/run/virtrtlab/simulators` | simulator runtime-state root |
+| `state_dir` | string | `/run/virtrtlab/state` | daemon-owned aggregate state directory for non-simulator runtime metadata |
+| `simulator_dir` | string | `/run/virtrtlab/simulators` | per-attachment simulator runtime-state and log root |
 
 Rules:
 
 - relative paths are not allowed
 - all configured paths must remain within one local filesystem namespace visible to the daemon
 - startup fails if the daemon cannot create or access the configured runtime paths
+- clients and companion documents must treat these paths as resolved runtime values,
+  not as immutable hard-coded locations
+- `state_dir` and `simulator_dir` are intentionally distinct so simulator lifecycle files do not become the implicit storage location for unrelated daemon runtime state
 
 ## 5. Control section
 
@@ -120,6 +126,8 @@ Rules:
 - `transport = "unix"` is the only required dataplane transport in `v0.2.0`
 - `{device}` expands to the canonical VirtRTLab device name such as `uart0` or `gpio0`
 - the daemon must expose the resolved dataplane path through the control plane for every device that supports a data socket
+- examples under `/run/virtrtlab/...` are the default installed layout, not the
+	only valid deployed layout
 
 Illustrative resolved paths:
 
@@ -193,3 +201,7 @@ One common `{device}.sock` naming rule is sufficient in `v0.2.0`.
 
 Per-device-type dataplane naming templates are out of scope for the first
 release and may be introduced only if a concrete deployment need appears.
+
+The runtime paths defined in this document are normative deployment outputs for
+the daemon and simulator lifecycle surfaces they govern. They do not create a
+second topology API beyond the control socket.

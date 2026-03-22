@@ -1,6 +1,6 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 
-# VirtRTLab Simulator Contract (v0.2 Draft)
+# VirtRTLab Simulator Contract (v0.2.0 Draft)
 
 This document is the source of truth for the simulator catalog and lifecycle contract targeted at `v0.2.0`.
 
@@ -432,6 +432,11 @@ Bus reset semantics:
 
 This preserves the existing daemon model and avoids conflating bus reset with process supervision.
 
+Path-discovery rule:
+
+- simulator processes must use the resolved runtime paths passed by environment variables such as `VIRTRTLAB_SIM_SOCKET`, `VIRTRTLAB_SIM_CONFIG`, and `VIRTRTLAB_SIM_LOG_DIR`
+- examples under `/run/virtrtlab/...` are the default installed layout, not the only valid deployed layout
+
 ### 4.5 Profile-driven startup failure semantics
 
 `virtrtlabctl up --config <file>` may materialize multiple attachments from one lab profile.
@@ -567,6 +572,10 @@ Managed simulator state lives under:
 /run/virtrtlab/simulators/
 ```
 
+This path is the default installed simulator runtime root. The resolved runtime
+root comes from daemon configuration and remains the value surfaced through the
+environment and control-plane-visible paths.
+
 The directory layout is per attached device.
 
 Canonical `v0.2.0` layout:
@@ -608,6 +617,7 @@ Rules:
 - `logs/` is created lazily on first start of the attachment
 - the daemon owns creation, mutation, and cleanup of this runtime state
 - `virtrtlabctl down` requests daemon-side cleanup of runtime-only state for active processes; `v0.2.0` initial expectation is full cleanup of process runtime under `/run`
+- these files are a normative simulator-runtime observability surface only; they do not replace the control socket as the topology-control API
 
 ### 5.6.1 Per-device `state.json` format
 
@@ -847,6 +857,7 @@ The initial persistence contract is intentionally simple:
 - attachment definitions created by `sim attach` are runtime-local, not reboot-persistent
 - `state.json`, `attachment.toml`, `config.toml`, `pid`, and `logs/` are all disposable runtime artifacts
 - after reboot or any loss of `/run/virtrtlab/simulators/`, no attachment is considered to exist anymore unless it is recreated by `sim attach` or `up --config`
+- no daemon or CLI client may treat these runtime files as a durable substitute for control-plane topology state
 
 Observable semantics by event:
 
@@ -1267,7 +1278,7 @@ Recommended mapping for simulator commands:
 | 1 | Operational error (spawn failure, process stop timeout, catalog parse error, filesystem error) |
 | 2 | Bad arguments, ambiguous simulator version selection, invalid config syntax, or parameter type validation error |
 | 3 | State conflict (already running, already attached, already starting) |
-| 4 | Not found or incompatible target (unknown simulator, unknown device, unsupported device kind, no attachment) |
+| 4 | Not found or incompatible target (unknown simulator, unknown device, incompatible target, no attachment) |
 
 Stable JSON error envelope:
 

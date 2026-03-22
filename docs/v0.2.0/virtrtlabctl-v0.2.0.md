@@ -18,7 +18,7 @@ The source of truth for the simulator runtime model remains
 
 Unless stated otherwise, every `v0.2.0` CLI command described in this document:
 
-- connects to `/run/virtrtlab/control.sock`
+- connects to the resolved daemon control socket, whose default installed path is `/run/virtrtlab/control.sock`
 - sends one structured control request to the daemon
 - renders the daemon result in human-readable or JSON CLI form
 
@@ -439,7 +439,8 @@ The daemon control plane is the source of truth for simulator lifecycle state.
 The runtime files under `/run/virtrtlab/simulators/` are daemon-owned runtime
 artifacts used to persist attachment state and logs; see
 [simulator-contract-v0.2.0.md](simulator-contract-v0.2.0.md) for the exact
-layout.
+layout. These runtime files are an observability surface for simulator
+lifecycle only; they are not a second control-plane authority.
 
 If the daemon is unavailable, `sim status` fails with a normal daemon-unavailable
 error. If the daemon is available but no attachments exist, `sim status` without
@@ -598,7 +599,7 @@ Recommended error mapping:
 | lifecycle lock acquisition timeout | 1 |
 | unknown device | 4 |
 | unknown simulator | 4 |
-| unsupported device type for selected simulator | 4 |
+| incompatible target for selected simulator | 4 |
 | `sim start` on detached device | 4 |
 | `sim detach` on detached device | 4 |
 | `sim status <device>` on unattached device | 4 |

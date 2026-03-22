@@ -34,7 +34,7 @@ In `v0.2.0`, VirtRTLab exposes one canonical control endpoint:
 
 | Property | Value |
 |---|---|
-| Path | `/run/virtrtlab/control.sock` |
+| Path | resolved daemon control-socket path; default installed path `/run/virtrtlab/control.sock` |
 | Address family | `AF_UNIX` |
 | Socket type | `SOCK_STREAM` |
 | Framing | UTF-8 JSON Lines (`\n`-terminated objects) |
@@ -44,6 +44,10 @@ Each request is one JSON object on one line. Each response is one JSON object on
 one line.
 
 Requests and responses are correlated by a client-supplied `id` field.
+
+Unless a surrounding rule says otherwise, JSON objects shown in this document
+are illustrative examples. Field presence, requiredness, and error behavior are
+defined by the accompanying tables and rules.
 
 ## 3. Connection model
 
@@ -185,20 +189,29 @@ Success result:
       {
         "name": "uart0",
         "type": "uart",
-        "aut_path": "/dev/ttyVIRTLAB0",
-        "data_path": "/run/virtrtlab/devices/uart0.sock"
+        "paths": {
+          "aut_path": "/dev/ttyVIRTLAB0",
+          "data_path": "/run/virtrtlab/devices/uart0.sock",
+          "sysfs_path": "/sys/kernel/virtrtlab/devices/uart0"
+        }
       },
       {
         "name": "uart1",
         "type": "uart",
-        "aut_path": "/dev/ttyVIRTLAB1",
-        "data_path": "/run/virtrtlab/devices/uart1.sock"
+        "paths": {
+          "aut_path": "/dev/ttyVIRTLAB1",
+          "data_path": "/run/virtrtlab/devices/uart1.sock",
+          "sysfs_path": "/sys/kernel/virtrtlab/devices/uart1"
+        }
       },
       {
         "name": "gpio0",
         "type": "gpio",
-        "chip_path": "/dev/gpiochip4",
-        "data_path": "/run/virtrtlab/devices/gpio0.sock"
+        "paths": {
+          "chip_path": "/dev/gpiochip4",
+          "data_path": "/run/virtrtlab/devices/gpio0.sock",
+          "sysfs_path": "/sys/kernel/virtrtlab/devices/gpio0"
+        }
       }
     ],
     "attachments": [
@@ -215,9 +228,18 @@ Success result:
 Behavior:
 
 - validates the full requested topology before partial creation
+- reconciles the active lab toward the requested set from any stable lab state
 - creates and destroys devices to match the requested set
 - applies declared attachments after the requested topology exists
 - starts only attachments whose effective `auto_start` is `true`
+
+Mutation phases:
+
+| Phase | Atomicity rule |
+|---|---|
+| topology and attachment-definition validation | all-or-nothing; any validation error prevents mutation |
+| device inventory and attachment-definition reconciliation | all-or-nothing; if this phase fails, the previously stable topology and attachment definitions remain visible |
+| simulator auto-start for attachments whose effective `auto_start` is `true` | not rolled back automatically; a failure returns structured partial-state details |
 
 Validation rules:
 
@@ -225,6 +247,12 @@ Validation rules:
 - duplicate `type` entries in one request are invalid
 - `count` must be a positive integer and must not exceed the advertised driver capability limit
 - attachment validation is atomic with topology validation; an invalid attachment prevents any topology mutation
+
+Failure rules:
+
+- if device create, device destroy, or attachment-definition materialization fails after successful validation, `lab.up` returns failure and the previously stable topology remains visible
+- if simulator auto-start is only partially successful after successful reconciliation, `lab.up` returns failure with partial state details; the reconciled topology and attachment definitions remain in effect
+- clients must treat `lab.up` as a target-state reconcile operation, not as an `empty -> up` bootstrap only
 
 #### `lab.down` result
 
@@ -309,6 +337,7 @@ Rules:
 - `lab.apply_profile` replaces the active lab topology with the resolved target profile
 - profile validation is atomic
 - if simulator auto-start is only partially successful after validation, the command returns failure with partial state details, matching the CLI contract
+- topology and attachment-definition reconciliation follow the same all-or-nothing rules as `lab.up`
 
 ### 5.2 `device.*`
 
@@ -435,7 +464,7 @@ Success result fields:
 |---|---|---|
 | `name` | string | device name |
 | `type` | string | device type |
-| `state` | string | current lifecycle state |
+| `state` | string | current device lifecycle state; one of `creating`, `up`, `resetting`, `destroying`, or `error` |
 | `paths` | object | resolved AUT, dataplane, and sysfs paths |
 | `attrs` | object | current control-plane-visible attributes |
 | `stats` | object | current per-device stats counters |
@@ -462,6 +491,7 @@ Rules:
 - all field validation is atomic per request: if one value is invalid, none are applied
 - unknown writable keys return `unknown-attribute`
 - read-only keys return `read-only-attribute`
+- common persistent-attribute validation follows the driver-contract ranges: `enabled` is boolean, `latency_ns` and `jitter_ns` are non-negative nanosecond integers subject to implementation maxima, and `drop_rate_ppm` plus `bitflip_rate_ppm` are integers in the inclusive range `0..1000000`
 
 Success result:
 
@@ -978,6 +1008,7 @@ The following `error.code` values are stable in `v0.2.0`:
 | `read-only-attribute` | write attempted on a read-only key |
 | `invalid-value` | attribute value failed range or type validation |
 | `invalid-payload` | injection or structured request payload failed validation |
+| `incompatible-target` | referenced objects exist but cannot be combined for the requested operation |
 | `kernel-failure` | daemon could not complete the requested kernel-side operation |
 | `simulator-failure` | simulator process launch or stop failed |
 | `not-attached` | simulator lifecycle action referenced an existing device without an attachment |
@@ -997,7 +1028,7 @@ Recommended action-specific error mapping:
 | `fault.inject` | unknown injection kind for device type | `invalid-payload` |
 | `sim.inspect` | ambiguous simulator version | `ambiguous-simulator-version` |
 | `sim.attach` | ambiguous simulator version | `ambiguous-simulator-version` |
-| `sim.attach` | simulator unsupported for device type | `invalid-request` |
+| `sim.attach` | simulator unsupported for device type | `incompatible-target` |
 | `sim.detach` | device has no attachment | `not-attached` |
 | `sim.start` | device has no attachment | `not-attached` |
 | `sim.start` | attachment already `running` or `starting` | `state-conflict` |

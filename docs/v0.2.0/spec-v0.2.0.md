@@ -15,8 +15,8 @@ VirtRTLab `v0.2.0` is built around three planes:
 | Plane | Surface | Role |
 |---|---|---|
 | AUT plane | `/dev/ttyVIRTLABN`, `/dev/gpiochipM`, other device nodes | the AUT talks to simulated peripherals through standard Linux interfaces |
-| Data plane | `/run/virtrtlab/devices/<device>.sock` | simulator-facing per-device dataplane |
-| Control plane | `/run/virtrtlab/control.sock` | topology, faults, stats, simulator lifecycle |
+| Data plane | resolved per-device dataplane socket, default installed pattern `/run/virtrtlab/devices/<device>.sock` | simulator-facing per-device dataplane |
+| Control plane | resolved daemon control socket, default installed path `/run/virtrtlab/control.sock` | topology, faults, stats, simulator lifecycle |
 
 Architectural boundary:
 
@@ -30,8 +30,8 @@ Architectural boundary:
 |---|---|---|
 | Device type | lowercase ASCII | `uart`, `gpio` |
 | Device instance | `<type><N>` | `uart0`, `gpio0` |
-| Control socket | fixed path | `/run/virtrtlab/control.sock` |
-| Device data socket | `/run/virtrtlab/devices/<device>.sock` | `/run/virtrtlab/devices/uart0.sock` |
+| Control socket | one resolved path per daemon instance; default installed path `/run/virtrtlab/control.sock` | `/run/virtrtlab/control.sock` |
+| Device data socket | one resolved path per device; default installed pattern `/run/virtrtlab/devices/<device>.sock` | `/run/virtrtlab/devices/uart0.sock` |
 
 ## 3. Device lifecycle model
 
@@ -48,6 +48,11 @@ The module-load boundary is no longer the normal configuration boundary.
 ## 4. Control-plane model
 
 The daemon is the canonical write-side controller.
+
+Topology-oriented control requests reconcile the active lab toward the requested
+target state. In particular, `lab.up` is not limited to an `empty` starting
+state: from any stable lab state, it validates the requested target first and
+then converges device inventory and attachment definitions toward that target.
 
 Normative references:
 

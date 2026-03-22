@@ -21,9 +21,9 @@ The daemon is responsible for all of the following:
 
 | Endpoint | Path | Purpose |
 |---|---|---|
-| Control socket | `/run/virtrtlab/control.sock` | structured control-plane requests and responses |
-| Device data socket | `/run/virtrtlab/devices/<device>.sock` | simulator dataplane for one device |
-| Runtime root | `/run/virtrtlab/` | daemon-owned state, pid files, sockets, simulator runtime metadata |
+| Control socket | resolved daemon control-socket path; default installed path `/run/virtrtlab/control.sock` | structured control-plane requests and responses |
+| Device data socket | resolved per-device dataplane path; default installed pattern `/run/virtrtlab/devices/<device>.sock` | simulator dataplane for one device |
+| Runtime root | resolved daemon runtime root; default installed path `/run/virtrtlab/` | daemon-owned state, pid files, sockets, simulator runtime metadata |
 
 The device dataplane contract remains separately specified in
 [socket-api-v0.2.0.md](socket-api-v0.2.0.md).
@@ -40,9 +40,9 @@ The daemon configuration contract is specified in
 
 | Phase | Required behavior |
 |---|---|
-| startup | load configuration, create or validate `/run/virtrtlab/`, bind the control socket, load driver capability inventory, and begin serving requests |
+| startup | load configuration, create or validate the configured runtime root, bind the resolved control socket, load driver capability inventory, and begin serving requests |
 | steady state | accept concurrent control clients, maintain current topology, drive per-device dataplanes, monitor simulator processes |
-| shutdown | stop managed simulators, close sockets, destroy only the runtime state implied by the requested shutdown mode |
+| shutdown | stop managed simulators, close sockets, and destroy only the runtime state owned by the active daemon instance |
 
 ### 3.2 Lab lifecycle
 
@@ -71,8 +71,8 @@ The daemon must preserve a strict separation between:
 
 | Plane | Interface | Payload |
 |---|---|---|
-| control plane | `/run/virtrtlab/control.sock` | JSON requests/responses/events |
-| device data plane | `/run/virtrtlab/devices/<device>.sock` | device-specific dataplane payload |
+| control plane | resolved daemon control-socket path; default installed path `/run/virtrtlab/control.sock` | JSON requests/responses/events |
+| device data plane | resolved per-device dataplane path; default installed pattern `/run/virtrtlab/devices/<device>.sock` | device-specific dataplane payload |
 
 The daemon must not multiplex dataplane payloads inside the control socket.
 
@@ -116,7 +116,7 @@ state inspection. Log formatting itself is not the external contract.
 | topology change failure | report structured error; keep previous stable topology visible |
 | simulator crash | update simulator state to `failed`; if subscribed clients exist, emit a `simulator-state-changed` event |
 | control socket bind failure | daemon startup fails |
-| device dataplane socket bind or driver-side open failure for one device | corresponding create or up operation fails for that device; previously running devices remain unchanged unless the requested operation was all-or-nothing |
+| device dataplane socket bind or driver-side open failure for one device | corresponding create or up operation fails for that device; topology and partial auto-start outcomes follow the control-socket contract for `device.create`, `lab.up`, and `lab.apply_profile` |
 
 ## 9. Service-manager integration
 
@@ -145,5 +145,7 @@ the daemon instead of replacing the transport model.
 
 - `lab.down` destroys all active device instances and stops managed simulators,
   but does not stop the daemon process itself
-- aggregate and per-device runtime state files under `/run/virtrtlab/` remain
-  part of the normative contract in `v0.2.0`
+- aggregate and per-device simulator runtime state files under the configured
+  simulator runtime root remain part of the normative simulator-observability
+  contract in `v0.2.0`; they do not replace the control socket as the topology
+  control API

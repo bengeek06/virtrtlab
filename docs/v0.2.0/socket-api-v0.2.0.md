@@ -23,7 +23,7 @@ This document covers only the device dataplane sockets.
 
 | Property | Value |
 |---|---|
-| Path pattern | `/run/virtrtlab/devices/<device>.sock` |
+| Path pattern | resolved dataplane path per device; default installed pattern `/run/virtrtlab/devices/<device>.sock` |
 | Address family | `AF_UNIX` |
 | Socket type | `SOCK_STREAM` |
 | Framing | device-specific, no control-plane framing |
@@ -93,6 +93,8 @@ GPIO bank-state rules:
 	dataplane socket contract in `v0.2.0`
 - the octet represents the physical line state, not an AUT-specific logical view after `active_low`
 - a simulator write updates the bank-state input side presented to the driver according to the GPIO driver contract
+- one simulator write is one atomic bank-state update request for the full octet
+- if any targeted line is currently owned by the AUT as output, the whole write is rejected with the driver-contract `state-conflict` outcome and no bit in the octet takes effect
 - a simulator read returns the current physical bank state exported by the driver dataplane side
 
 GPIO devices with a different physical line count may still be VirtRTLab
@@ -109,7 +111,7 @@ control through the normal Linux GPIO userspace interfaces.
 |---|---|
 | simulator disconnect | daemon closes the dataplane session for that device and returns to waiting state |
 | bus or device reset invalidates the current data path | daemon closes and recreates the affected internal relay resources; the simulator connection is dropped |
-| device destroy | the data socket disappears for that device |
+| device destroy | existing sessions are closed, new connections fail because the endpoint no longer exists, and the data socket path disappears for that device |
 
 Type-specific notes:
 
